@@ -20,10 +20,14 @@ import {
   PlusCircle,
   RotateCw,
   Activity,
-  Zap
+  Zap,
+  FileSignature,
+  ShieldAlert,
+  FileCheck
 } from 'lucide-react';
 import { BatchQualityRecord, BatchDisposition, QualityTagConfigItem } from '../../types/quality';
 import { QualityTagMappingModal } from './QualityTagMappingModal';
+import { EbrSignatureModal } from './EbrSignatureModal';
 import * as api from '../../services/api';
 
 export const QualityOverviewTab: React.FC = () => {
@@ -42,6 +46,7 @@ export const QualityOverviewTab: React.FC = () => {
   const [statusFilter, setStatusFilter] = useState<'ALL' | 'PASS' | 'FAIL'>('ALL');
   const [isTagModalOpen, setIsTagModalOpen] = useState(false);
   const [isInspectionModalOpen, setIsInspectionModalOpen] = useState(false);
+  const [isEbrSignModalOpen, setIsEbrSignModalOpen] = useState(false);
   const [qaTags, setQaTags] = useState<Record<string, QualityTagConfigItem | api.ModuleTagItem>>({});
 
   // New QA Inspection Form State
@@ -251,6 +256,16 @@ export const QualityOverviewTab: React.FC = () => {
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
+            onClick={() => setIsEbrSignModalOpen(true)}
+            className="h-9 px-3.5 bg-emerald-700 hover:bg-emerald-800 text-white font-semibold text-xs uppercase tracking-wider flex items-center gap-1.5 hallmark-focus active:translate-y-px rounded-xs transition-all shadow-xs"
+            title="Ký số điện tử và phát hành lệnh xuất xưởng hồ sơ lô điện tử (FDA 21 CFR Part 11)"
+          >
+            <FileSignature className="w-3.5 h-3.5 text-emerald-200" />
+            <span>✍ KÝ SỐ &amp; PHÁT HÀNH LÔ (EBR)</span>
+          </button>
+
+          <button
+            type="button"
             onClick={() => setIsTagModalOpen(true)}
             className="h-9 px-3 bg-white border border-slate-300 hover:bg-slate-100 text-slate-800 font-semibold text-xs uppercase tracking-wider flex items-center gap-1.5 hallmark-focus active:translate-y-px rounded-xs transition-all shadow-xs"
             title="Cấu hình ánh xạ Kepware OPC UA Inline Quality Sensors (pH, Brix, Temp)"
@@ -450,7 +465,8 @@ export const QualityOverviewTab: React.FC = () => {
               ) : (
                 displayedBatches.map((batch) => {
                   const isSelected = selectedReportId === batch.reportId;
-                  const isPass = batch.status === 'PASS';
+                  const isPass = batch.status === 'PASS (RELEASE READY)' || (batch.status === 'PASS' && batch.disposition === 'RELEASED');
+                  const isWarning = batch.status === 'WARNING (HOLD)';
 
                   return (
                     <tr
@@ -462,6 +478,8 @@ export const QualityOverviewTab: React.FC = () => {
                           ? 'bg-[#E0F2FE] text-slate-900 font-semibold border-l-4 border-l-sky-600'
                           : isPass
                           ? 'hover:bg-emerald-50/40'
+                          : isWarning
+                          ? 'bg-amber-50/20 hover:bg-amber-50/40'
                           : 'bg-rose-50/20 hover:bg-rose-50/40'
                       }`}
                     >
@@ -502,29 +520,45 @@ export const QualityOverviewTab: React.FC = () => {
 
                       {/* Avg Deviation (%) */}
                       <td className="py-2.5 px-3 border-r border-slate-200 text-right font-bold font-mono">
-                        <span className={isPass ? 'text-emerald-700' : 'text-rose-700'}>
+                        <span className={isPass ? 'text-emerald-700' : isWarning ? 'text-amber-700' : 'text-rose-700'}>
                           {batch.avgError > 0 ? `+${batch.avgError.toFixed(2)}%` : `${batch.avgError.toFixed(2)}%`}
                         </span>
                       </td>
 
-                      {/* QA Status */}
+                      {/* QA Status - Strict HACCP CCP Veto Evaluated */}
                       <td className="py-2.5 px-3 border-r border-slate-200 text-center">
                         {isPass ? (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-xs font-bold text-[10px] bg-[#DCFCE7] text-[#166534] border border-emerald-300">
-                            <CheckCircle2 className="w-3 h-3 text-[#166534]" />
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-xs font-bold text-[10px] bg-emerald-100 text-emerald-800 border border-emerald-300">
+                            <CheckCircle2 className="w-3 h-3 text-emerald-700" />
                             PASS
                           </span>
+                        ) : isWarning ? (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-xs font-bold text-[10px] bg-amber-100 text-amber-800 border border-amber-300">
+                            <AlertTriangle className="w-3 h-3 text-amber-700" />
+                            HOLD
+                          </span>
                         ) : (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-xs font-bold text-[10px] bg-[#FEE2E2] text-[#991B1B] border border-rose-300 animate-pulse">
-                            <AlertTriangle className="w-3 h-3 text-[#991B1B]" />
-                            FAIL
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-xs font-bold text-[10px] bg-rose-100 text-rose-800 border border-rose-300 animate-pulse">
+                            <ShieldAlert className="w-3 h-3 text-rose-700" />
+                            QUARANTINE
                           </span>
                         )}
                       </td>
 
                       {/* Disposition / Action */}
                       <td className="py-2.5 px-3 text-center">
-                        {getDispositionBadge(batch.disposition || (isPass ? 'RELEASED' : 'QUARANTINED'))}
+                        <div className="flex items-center justify-center gap-1.5 flex-wrap">
+                          {getDispositionBadge(batch.disposition || (isPass ? 'RELEASED' : 'QUARANTINED'))}
+                          {batch.isElectronicallySigned && (
+                            <span 
+                              className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-xs text-[9px] font-bold bg-sky-50 text-sky-800 border border-sky-300"
+                              title={`Signed by ${batch.signedBy || 'QA'}: ${batch.signatureHash?.substring(0, 10)}...`}
+                            >
+                              <FileCheck className="w-2.5 h-2.5 text-sky-600" />
+                              SIGNED
+                            </span>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   );
@@ -785,6 +819,23 @@ export const QualityOverviewTab: React.FC = () => {
         onClose={() => setIsTagModalOpen(false)}
         onSaved={fetchQaTags}
       />
+
+      {/* FDA 21 CFR Part 11 Electronic Signature Modal */}
+      {(() => {
+        const activeBatch = filteredBatchRecords.find((b) => b.reportId === selectedReportId) || filteredBatchRecords[0];
+        if (!activeBatch) return null;
+        return (
+          <EbrSignatureModal
+            isOpen={isEbrSignModalOpen}
+            onClose={() => setIsEbrSignModalOpen(false)}
+            orderCode={activeBatch.orderId}
+            reportCode={activeBatch.reportCode}
+            recipeName={activeBatch.recipeName}
+            volume={activeBatch.totalProduced}
+            initialDisposition={activeBatch.disposition === 'QUARANTINED' ? 'QUARANTINED' : 'RELEASED'}
+          />
+        );
+      })()}
     </div>
   );
 };

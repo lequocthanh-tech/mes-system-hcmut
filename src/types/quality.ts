@@ -2,7 +2,7 @@
  * contrast: WCAG AA Pass
  */
 
-export type BatchQualityStatus = 'PASS' | 'FAIL' | 'PENDING_REVIEW';
+export type BatchQualityStatus = 'PASS' | 'FAIL' | 'PENDING_REVIEW' | 'PASS (RELEASE READY)' | 'WARNING (HOLD)' | 'FAIL (QUARANTINE)';
 export type BatchDisposition = 'RELEASED' | 'QUARANTINED' | 'PENDING_REVIEW';
 
 export interface BatchQualityRecord {
@@ -21,6 +21,11 @@ export interface BatchQualityRecord {
   checkedAt: string;
   reviewerNotes?: string;
   failingParameter?: string;
+  isElectronicallySigned?: boolean;
+  signatureHash?: string | null;
+  signedBy?: string;
+  signerRole?: string;
+  signedAt?: string;
 }
 
 export interface BatchQualityDetailItem {

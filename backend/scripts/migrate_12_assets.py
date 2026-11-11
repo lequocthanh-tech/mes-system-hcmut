@@ -1,10 +1,29 @@
+"""
+backend/scripts/migrate_12_assets.py
+Cong cu khoi tao / dong bo chuan 12 thiet bi nha may trong bang dbo.Equipment_Master
+va dam bao day du cac cot trong dbo.Equipment_Maintenance.
+Chay lenh: python backend/scripts/migrate_12_assets.py
+"""
+
 import sys
 import os
-sys.path.append(os.path.abspath("backend"))
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+BACKEND_DIR = os.path.dirname(SCRIPT_DIR)
+if BACKEND_DIR not in sys.path:
+    sys.path.insert(0, BACKEND_DIR)
+
 import db_connector as dbc
+
 
 def run_migration():
     conn = dbc.get_connection()
+    if not conn:
+        print("[ERROR] Cannot connect to SQL Server.")
+        return
     cursor = conn.cursor()
 
     # 1. Ensure Equipment_Maintenance columns exist
@@ -63,7 +82,6 @@ def run_migration():
         (12, 'VALVE_CIP_RECYCLE', 'Van tuần hoàn CIP/vệ sinh', 'CIP Bypass Valve', 'Line 1 - CIP Station', None, None, None, 500.0, 'Van tuần hoàn hệ thống CIP vệ sinh V-301 (PH13101)')
     ]
 
-    # Save existing runtimes and status if already present
     cursor.execute("SELECT EquipmentID, EquipmentCode, Runtime_Hours, TotalStarts, CurrentStatus FROM dbo.Equipment_Master")
     current_rows = cursor.fetchall()
     saved_runtimes = {}
@@ -97,7 +115,6 @@ def run_migration():
     conn.commit()
     print("[3/4] dbo.Equipment_Master seeded with exact 12 plant assets.")
 
-    # 4. Clean out simulation/mock Node IDs from dbo.Tag_Config where Module = 'maintenance'
     cursor.execute("""
         DELETE FROM dbo.Tag_Config 
         WHERE Module = 'maintenance' 
@@ -108,6 +125,7 @@ def run_migration():
 
     conn.close()
     print("Migration successfully completed!")
+
 
 if __name__ == "__main__":
     run_migration()

@@ -38,20 +38,19 @@ import {
   Cpu,
   Info,
   Radio,
-  SlidersHorizontal,
-  ChevronDown,
   Plus,
   Lock,
   Activity,
   UploadCloud,
-  Settings2
+  Settings2,
+  PackagePlus,
+  ShieldCheck
 } from 'lucide-react';
 
 export const RealTimeStock: React.FC = () => {
   const { 
     stocks, 
     consumptionLogs, 
-    simulateBatchDeduction, 
     refreshStockBalance,
     fetchLiveStocks,
     isRefreshing
@@ -60,7 +59,6 @@ export const RealTimeStock: React.FC = () => {
   const { user } = useAuth();
   const isAdmin = (user?.role?.toUpperCase() === 'ADMIN') || (user?.username?.toLowerCase() === 'admin');
 
-  const [isSimulating, setIsSimulating] = useState(false);
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'error' | 'warning' } | null>(null);
   const [localRefreshing, setLocalRefreshing] = useState(false);
 
@@ -71,6 +69,7 @@ export const RealTimeStock: React.FC = () => {
 
   // Modals state
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [showRestockModal, setShowRestockModal] = useState(false);
   const [editingTank, setEditingTank] = useState<any | null>(null);
 
   // Create Tank Form State
@@ -87,22 +86,45 @@ export const RealTimeStock: React.FC = () => {
   const [newTareWeight, setNewTareWeight] = useState<number>(0.0);
   const [isSubmittingCreate, setIsSubmittingCreate] = useState(false);
 
-  // Dev Harness State
-  const [testOrderId, setTestOrderId] = useState<string>('WO-2026-001');
-  const [testRecipe, setTestRecipe] = useState<string>('Fresh Pasteurized UHT Milk (2.0L)');
+  // Manual Stock Replenishment State (Warehouse Receiving)
+  const [restockTankId, setRestockTankId] = useState('TANK-01');
+  const [restockQty, setRestockQty] = useState<number>(5.0);
+  const [restockLot, setRestockLot] = useState<string>('LOT-SUPPLIER-2026');
+  const [restockReceipt, setRestockReceipt] = useState<string>('WH/IN/REC-001');
+  const [restockRemark, setRestockRemark] = useState<string>('Nhập bổ sung kho nguyên liệu');
+  const [isSubmittingRestock, setIsSubmittingRestock] = useState(false);
+
+  // Automatic Backflush Status Audit State
+  const [backflushRecords, setBackflushRecords] = useState<api.BackflushStatusRecord[]>([]);
+  const [isLoadingBackflush, setIsLoadingBackflush] = useState(false);
+
+  const fetchBackflushData = async () => {
+    setIsLoadingBackflush(true);
+    try {
+      const res = await api.getBackflushStatus(10);
+      if (res && res.records) {
+        setBackflushRecords(res.records);
+      }
+    } catch (err) {
+      console.warn('Failed to fetch backflush status:', err);
+    } finally {
+      setIsLoadingBackflush(false);
+    }
+  };
 
   const config = useSafeConfig();
   const sqlOnline = config?.sqlConfig?.connectionState === 'connected';
   const isGatewayOnline = Boolean(config?.gatewayStatus?.is_connected || config?.gatewayStatus?.connected || config?.gatewayStatus?.status === 'ONLINE');
   const prevSqlOnlineRef = React.useRef<boolean>(false);
 
-  // Sync live stock directly from SQL Server on view mount
+  // Sync live stock directly from SQL Server on view mount and fetch backflush audit history
   React.useEffect(() => {
     if (fetchLiveStocks) {
       fetchLiveStocks(3, 300);
     } else {
       refreshStockBalance();
     }
+    fetchBackflushData();
   }, []);
 
   // Listener to sqlOnline status: when SQL Server transitions to ONLINE, automatically trigger re-fetch of /api/inventory
@@ -144,13 +166,47 @@ export const RealTimeStock: React.FC = () => {
     }
   };
 
-  const handleSimulate = () => {
-    setIsSimulating(true);
-    setTimeout(() => {
-      simulateBatchDeduction(`BATCH_${testOrderId.replace('WO-', '')}`, testRecipe, testOrderId);
-      setIsSimulating(false);
-      showToast(`Batch ${testOrderId} completed! Post-batch deduction reconciled: -1.40L Raw Milk, -0.40kg Sugar, -0.20L Additives.`, 'success');
-    }, 400);
+  const handleRestockSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const qty = Number(restockQty);
+    if (isNaN(qty) || qty <= 0) {
+      showToast('Số lượng nhập phải lớn hơn 0.', 'error');
+      return;
+    }
+
+    const selTank = stocks.find((s: any) => (s.tankId || s.tank_id) === restockTankId);
+    const capacity = Number(selTank?.tank_capacity || selTank?.tankCapacity || selTank?.capacity || 100.0);
+    const curStock = Number(selTank?.currentStock || selTank?.current_stock || 0.0);
+    const headspace = capacity - curStock;
+
+    if (qty > headspace) {
+      showToast(`[KHÓA CHỐNG TRÀN SILO] Lượng nhập (${qty}) vượt quá sức chứa còn trống (${headspace.toFixed(2)})!`, 'warning');
+      return;
+    }
+
+    setIsSubmittingRestock(true);
+    try {
+      await api.intakeInventory({
+        tank_id: restockTankId,
+        quantity: qty,
+        mode: 'add',
+        material_code: selTank?.materialCode || selTank?.material_code || '',
+        material_name: selTank?.materialName || selTank?.material_name || '',
+        user: user?.username || 'Warehouse_Operator',
+        supplierLot: restockLot.trim(),
+        receiptCode: restockReceipt.trim(),
+        remark: `Receipt: ${restockReceipt.trim()}, Lot: ${restockLot.trim()}. ${restockRemark.trim()}`
+      });
+
+      showToast(`✔ Nhập kho thành công: +${qty} vào [${restockTankId}]. Đã cập nhật sổ cái SQL & Odoo!`, 'success');
+      setShowRestockModal(false);
+      if (fetchLiveStocks) await fetchLiveStocks(3, 300);
+      await fetchBackflushData();
+    } catch (err: any) {
+      showToast(err.message || 'Lỗi khi nhập kho bổ sung.', 'error');
+    } finally {
+      setIsSubmittingRestock(false);
+    }
   };
 
   const handleRefresh = async () => {
@@ -345,6 +401,17 @@ export const RealTimeStock: React.FC = () => {
               ISA-95 LEVEL 3 · INVENTORY RECONCILIATION ENGINE (PORT 8000)
             </span>
           </div>
+
+          {/* Manual Stock Replenishment Action for Warehouse Operators */}
+          <button
+            type="button"
+            onClick={() => setShowRestockModal(true)}
+            className="h-9 px-3.5 bg-emerald-700 hover:bg-emerald-800 text-white font-semibold text-xs uppercase tracking-wider flex items-center gap-1.5 rounded-xs transition-all shadow-xs hallmark-focus active:translate-y-px"
+            title="Nhập kho bổ sung nguyên liệu (Sữa, Đường, Phụ gia)"
+          >
+            <PackagePlus className="w-3.5 h-3.5" />
+            <span>➕ Nhập kho bổ sung (Restock)</span>
+          </button>
 
           {/* Add New Tank Button (RBAC: Admin) */}
           <button
@@ -652,59 +719,84 @@ export const RealTimeStock: React.FC = () => {
         </div>
       </div>
 
-      {/* DISCRETE DEVELOPER TEST HARNESS (Accordion Menu) */}
-      <details className="group bg-white border border-slate-200 p-3 rounded-xs text-xs font-mono shadow-xs">
-        <summary className="cursor-pointer font-bold text-slate-700 hover:text-slate-900 flex items-center justify-between list-none select-none">
+      {/* SECTION: AUTOMATIC EVENT-DRIVEN BACKFLUSH STATUS (ISA-95 CLOSED-LOOP) */}
+      <div className="bg-white border border-slate-200 p-4 rounded-xs text-xs font-mono shadow-xs space-y-3">
+        <div className="flex items-center justify-between flex-wrap gap-2 pb-2 border-b border-slate-200">
           <div className="flex items-center gap-2">
-            <SlidersHorizontal className="w-4 h-4 text-slate-600" />
-            <span>Developer Test Harness: Simulate Batch Completion (Testing Without Hardware)</span>
+            <ShieldCheck className="w-4 h-4 text-emerald-600" />
+            <h3 className="font-bold text-slate-800 uppercase not-italic text-xs tracking-tight">
+              AUTOMATIC BACKFLUSH STATUS (ISA-95 EVENT-DRIVEN CLOSED-LOOP)
+            </h3>
+            <span className="px-2 py-0.5 bg-emerald-50 text-emerald-800 border border-emerald-300 font-bold text-[10px] rounded-xs">
+              IDEMPOTENT SINGLE-SHOT COMMITTED
+            </span>
           </div>
-          <ChevronDown className="w-4 h-4 text-slate-500 group-open:rotate-180 transition-transform" />
-        </summary>
-
-        <div className="mt-3 pt-3 border-t border-slate-200 space-y-3">
-          <p className="text-[11px] text-slate-600">
-            Menu này dành cho kỹ sư thử nghiệm hệ thống. Trong vận hành thực tế, sự kiện hoàn thành mẻ được nhận tự động qua Kepware Gateway hoặc Module Operations.
-          </p>
-
-          <div className="flex flex-wrap items-center gap-3">
-            <div className="flex items-center gap-2">
-              <span className="text-[11px] text-slate-500">Mã lệnh:</span>
-              <select
-                value={testOrderId}
-                onChange={(e) => setTestOrderId(e.target.value)}
-                className="bg-white border border-slate-300 h-9 px-2.5 text-xs font-mono rounded-xs hallmark-focus"
-              >
-                <option value="WO-2026-001">WO-2026-001</option>
-                <option value="WO-2026-002">WO-2026-002</option>
-                <option value="WO-2026-003">WO-2026-003</option>
-              </select>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <span className="text-[11px] text-slate-500">Công thức:</span>
-              <select
-                value={testRecipe}
-                onChange={(e) => setTestRecipe(e.target.value)}
-                className="bg-white border border-slate-300 h-9 px-2.5 text-xs font-mono rounded-xs hallmark-focus"
-              >
-                <option value="Fresh Pasteurized UHT Milk (2.0L)">Fresh Pasteurized UHT Milk (2.0L)</option>
-                <option value="Chocolate Flavored Dairy (2.0L)">Chocolate Flavored Dairy (2.0L)</option>
-              </select>
-            </div>
-
-            <button
-              type="button"
-              onClick={handleSimulate}
-              disabled={isSimulating}
-              className="h-9 px-4 bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 text-white font-semibold text-xs uppercase tracking-wider flex items-center gap-1.5 hallmark-focus active:translate-y-px rounded-xs transition-all shadow-xs"
-            >
-              <Zap className={`w-3.5 h-3.5 ${isSimulating ? 'animate-spin' : ''}`} />
-              <span>{isSimulating ? 'Đang khấu trừ...' : 'Simulate Batch Completion'}</span>
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={fetchBackflushData}
+            disabled={isLoadingBackflush}
+            className="h-7 px-2.5 bg-slate-50 border border-slate-200 hover:bg-slate-100 text-slate-700 text-[10px] font-semibold flex items-center gap-1 rounded-xs transition-all hallmark-focus"
+          >
+            <RefreshCw className={`w-3 h-3 ${isLoadingBackflush ? 'animate-spin text-sky-600' : ''}`} />
+            <span>Làm mới đối soát</span>
+          </button>
         </div>
-      </details>
+
+        <p className="text-[11px] text-slate-600">
+          Cơ chế trừ kho ISA-95 tự động: Khi mẻ sản xuất đạt trạng thái <strong className="text-slate-800">COMPLETED</strong>, hệ thống tự động kích hoạt trừ vật tư 1 lần duy nhất từ 3 Virtual Silos, kích hoạt cơ chế Idempotency Guard chống trừ trùng và gán mã lô nguồn gốc FDA 21 CFR Part 11.
+        </p>
+
+        {/* Backflush History Table */}
+        <div className="overflow-x-auto border border-slate-200 rounded-xs">
+          <table className="w-full text-left text-[11px] font-mono">
+            <thead className="bg-slate-100 text-slate-700 uppercase tracking-wide border-b border-slate-200">
+              <tr>
+                <th className="py-2 px-3">Thời gian</th>
+                <th className="py-2 px-3">Mã lệnh sản xuất</th>
+                <th className="py-2 px-3">Nguồn phát động</th>
+                <th className="py-2 px-3">Chi tiết khấu trừ Silo &amp; Lot Genealogy</th>
+                <th className="py-2 px-3 text-right">Trạng thái Idempotency</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {backflushRecords.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="py-4 text-center text-slate-400">
+                    Chưa có giao dịch khấu trừ tự động nào trong phiên làm việc. Khấu trừ sẽ tự động chạy khi mẻ đạt COMPLETED.
+                  </td>
+                </tr>
+              ) : (
+                backflushRecords.map((rec) => (
+                  <tr key={rec.id} className="hover:bg-slate-50">
+                    <td className="py-2 px-3 text-slate-500 whitespace-nowrap">
+                      {new Date(rec.action_time).toLocaleString('vi-VN')}
+                    </td>
+                    <td className="py-2 px-3 font-bold text-slate-900 whitespace-nowrap">
+                      <span className="px-1.5 py-0.5 bg-slate-100 border border-slate-300 rounded-xs">
+                        {rec.order_code !== '--' ? rec.order_code : rec.detail.slice(0, 20)}
+                      </span>
+                    </td>
+                    <td className="py-2 px-3 text-slate-700 whitespace-nowrap">
+                      <span className="text-[10px] px-1.5 py-0.5 bg-sky-50 text-sky-800 border border-sky-200 rounded-xs">
+                        {rec.user_name} ({rec.user_role})
+                      </span>
+                    </td>
+                    <td className="py-2 px-3 text-slate-600 truncate max-w-md" title={rec.detail}>
+                      {rec.detail}
+                    </td>
+                    <td className="py-2 px-3 text-right whitespace-nowrap">
+                      <span className="px-2 py-0.5 bg-emerald-50 text-emerald-800 border border-emerald-300 font-bold text-[10px] rounded-xs inline-flex items-center gap-1">
+                        <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                        <span>SINGLE_SHOT_COMMITTED</span>
+                      </span>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
 
       {/* ========================================================================= */}
       {/* MODAL 1: CREATE NEW STORAGE TANK (ADMIN ONLY) */}
@@ -1004,6 +1096,162 @@ export const RealTimeStock: React.FC = () => {
           if (fetchLiveStocks) fetchLiveStocks(3, 300);
         }}
       />
+
+      {/* ========================================================================= */}
+      {/* MODAL 3: MANUAL STOCK REPLENISHMENT / RECEIVING (WAREHOUSE OPERATOR) */}
+      {/* ========================================================================= */}
+      {showRestockModal && (() => {
+        const selectedTank = stocks.find((s: any) => (s.tankId || s.tank_id) === restockTankId);
+        const capacity = Number(selectedTank?.tank_capacity || selectedTank?.tankCapacity || selectedTank?.capacity || 100.0);
+        const curStock = Number(selectedTank?.currentStock || selectedTank?.current_stock || 0.0);
+        const unit = selectedTank?.unit || (restockTankId === 'TANK-01' ? 'L' : 'kg');
+        const headspace = Math.max(0, capacity - curStock);
+        const isOverflow = Number(restockQty) > headspace;
+
+        return (
+          <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+            <div className="bg-white border border-slate-300 shadow-xl w-full max-w-lg rounded-xs overflow-hidden animate-in fade-in zoom-in-95 font-mono">
+              <div className="px-5 py-3.5 bg-slate-100 border-b border-slate-200 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <PackagePlus className="w-4 h-4 text-emerald-700" />
+                  <h3 className="font-bold text-slate-900 uppercase tracking-wide not-italic text-xs">
+                    Nhập kho bổ sung nguyên liệu (Manual Stock Replenishment)
+                  </h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowRestockModal(false)}
+                  className="text-slate-500 hover:text-slate-900 font-bold px-1.5 py-0.5 text-sm"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <form onSubmit={handleRestockSubmit} className="p-5 space-y-4 text-xs">
+                {/* Tank Selector */}
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-700 uppercase mb-1">
+                    Chọn bồn chứa nhận nguyên liệu (Target Silo / Tank)
+                  </label>
+                  <select
+                    value={restockTankId}
+                    onChange={(e) => setRestockTankId(e.target.value)}
+                    className="w-full bg-white border border-slate-300 h-9 px-3 text-xs font-mono rounded-xs hallmark-focus"
+                  >
+                    <option value="TANK-01">TANK-01 · Sữa tươi nguyên liệu (Raw Milk) [L]</option>
+                    <option value="TANK-02">TANK-02 · Đường tinh luyện RE (Sugar) [kg]</option>
+                    <option value="TANK-03">TANK-03 · Phụ gia vi chất dinh dưỡng (Additive) [kg]</option>
+                  </select>
+                </div>
+
+                {/* Stock & Headspace Status Summary */}
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xs grid grid-cols-3 gap-2 text-[11px]">
+                  <div>
+                    <span className="text-slate-500 block text-[10px]">Tồn kho hiện tại:</span>
+                    <strong className="text-slate-900 text-sm">{curStock.toFixed(2)} {unit}</strong>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 block text-[10px]">Dung tích thiết kế:</span>
+                    <strong className="text-slate-700 text-sm">{capacity.toFixed(2)} {unit}</strong>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 block text-[10px]">Sức chứa còn trống:</span>
+                    <strong className="text-emerald-700 text-sm">{headspace.toFixed(2)} {unit}</strong>
+                  </div>
+                </div>
+
+                {/* Quantity Input */}
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-[11px] font-bold text-slate-700 uppercase">
+                      Số lượng nhập kho ({unit})
+                    </label>
+                    {isOverflow && (
+                      <span className="text-rose-600 font-bold text-[10px] animate-pulse">
+                        ⚠ VƯỢT QUÁ SỨC CHỨA CÒN TRỐNG!
+                      </span>
+                    )}
+                  </div>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0.01"
+                    value={restockQty}
+                    onChange={(e) => setRestockQty(parseFloat(e.target.value) || 0)}
+                    required
+                    className={`w-full bg-white border h-9 px-3 text-xs font-mono rounded-xs hallmark-focus ${
+                      isOverflow ? 'border-rose-500 ring-1 ring-rose-500' : 'border-slate-300'
+                    }`}
+                  />
+                </div>
+
+                {/* Lot & Receipt */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 uppercase mb-1">
+                      Mã lô nhà cung cấp (Lot Number)
+                    </label>
+                    <input
+                      type="text"
+                      value={restockLot}
+                      onChange={(e) => setRestockLot(e.target.value)}
+                      placeholder="LOT-SUPPLIER-..."
+                      required
+                      className="w-full bg-white border border-slate-300 h-9 px-3 text-xs font-mono rounded-xs hallmark-focus"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 uppercase mb-1">
+                      Mã phiếu nhập (Receipt Code)
+                    </label>
+                    <input
+                      type="text"
+                      value={restockReceipt}
+                      onChange={(e) => setRestockReceipt(e.target.value)}
+                      placeholder="WH/IN/..."
+                      required
+                      className="w-full bg-white border border-slate-300 h-9 px-3 text-xs font-mono rounded-xs hallmark-focus"
+                    />
+                  </div>
+                </div>
+
+                {/* Notes */}
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-700 uppercase mb-1">
+                    Ghi chú / Đơn vị cung cấp
+                  </label>
+                  <input
+                    type="text"
+                    value={restockRemark}
+                    onChange={(e) => setRestockRemark(e.target.value)}
+                    placeholder="Nhập bổ sung từ nhà xe / đơn hàng PO..."
+                    className="w-full bg-white border border-slate-300 h-9 px-3 text-xs font-mono rounded-xs hallmark-focus"
+                  />
+                </div>
+
+                {/* Actions */}
+                <div className="pt-3 border-t border-slate-200 flex items-center justify-end gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => setShowRestockModal(false)}
+                    className="h-9 px-4 bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 font-semibold text-xs uppercase tracking-wider rounded-xs hallmark-focus shadow-xs"
+                  >
+                    Hủy bỏ
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isSubmittingRestock || isOverflow || restockQty <= 0}
+                    className="h-9 px-4 bg-emerald-700 hover:bg-emerald-800 disabled:bg-slate-400 text-white font-semibold text-xs uppercase tracking-wider flex items-center gap-1.5 rounded-xs hallmark-focus shadow-xs"
+                  >
+                    <PackagePlus className="w-3.5 h-3.5" />
+                    <span>{isSubmittingRestock ? 'Đang ghi sổ...' : 'Xác nhận nhập kho'}</span>
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 };

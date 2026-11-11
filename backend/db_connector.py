@@ -266,15 +266,216 @@ def log_user_action(user_name: str, user_role: str, action_name: str, detail: st
         return False
 
 
-def log_plc_datalog(order_code: str, tag_name: str, value: float, unit: Optional[str] = None) -> bool:
-    """Writes a telemetry snapshot into dbo.PLC_Datalog."""
+# ============================================================================
+# ISA-88 BATCH CONTEXTUALIZATION (dbo.PLC_Datalog: Batch_ID / Unit_ID / Phase_ID)
+# ============================================================================
+# Every historian record is stamped with the ISA-88 procedural/physical context:
+#   Batch_ID -> active OrderCode (control recipe instance)
+#   Unit_ID  -> physical ISA-88 unit (dbo.Unit.Unit_Code: TK01, MIX01, HEATER01, ...)
+#   Phase_ID -> active recipe phase (STATUS_CURRENT_PHASE, e.g. PH_HEATING)
+# Columns are NULLable so legacy rows and legacy writers remain fully valid.
+
+ISA88_CONTEXT_COLUMNS: Tuple[Tuple[str, str], ...] = (
+    ("Batch_ID", "NVARCHAR(50) NULL"),
+    ("Unit_ID", "NVARCHAR(50) NULL"),
+    ("Phase_ID", "NVARCHAR(50) NULL"),
+)
+
+# Batch states (dbo.Orders.Status / ISA-88 state model) that allow historian logging.
+# HOLDING/HELD keep logging so the hold excursion is part of the batch record.
+ISA88_LOGGABLE_BATCH_STATES: Tuple[str, ...] = ("RUNNING", "HOLDING", "HELD")
+
+# Numeric STATUS_CURRENT_PHASE codes (PLC phase pointer) -> canonical phase IDs
+ISA88_PHASE_CODE_MAP: Dict[int, str] = {
+    0: "PH_IDLE",
+    1: "PH_SUPPLYMILK",
+    2: "PH_SUPPLYSUGAR",
+    3: "PH_SUPPLYADDITIVE",
+    4: "PH_MIXING",
+    5: "PH_HEATING",
+    6: "PH_COOLING",
+    7: "PH_DISCHARGE",
+}
+
+# Siemens PM-CONTROL / PCS 7 phase aliases -> canonical ISA-88 phase IDs
+ISA88_PHASE_ALIASES: Dict[str, str] = {
+    "PH11101": "PH_SUPPLYMILK", "PH_SUPPLYMILK_PC2": "PH_SUPPLYMILK",
+    "PH11202": "PH_SUPPLYSUGAR", "PH_SUPPLYSUGAR_PC2": "PH_SUPPLYSUGAR",
+    "PH11303": "PH_SUPPLYADDITIVE",
+    "PH12101": "PH_MIXING", "PH_AGITATE": "PH_MIXING", "PH_AGITATING": "PH_MIXING", "PH_AGITATE_PC2": "PH_MIXING",
+    "PH12202": "PH_MIXING", "PH_CIRCULATE": "PH_MIXING",
+    "PH22101": "PH_HEATING", "PH_HEAT": "PH_HEATING", "PH_HEAT_PC2": "PH_HEATING",
+    "PH22102": "PH_HEATING", "PH_HOLD_TEMP": "PH_HEATING", "PH_STERILIZATION": "PH_HEATING",
+    "PH22201": "PH_COOLING", "PH_CHILL": "PH_COOLING", "PH_CHILL_PC2": "PH_COOLING",
+    "PH12303": "PH_DISCHARGE", "PH_TRANSFER_MIX": "PH_DISCHARGE",
+    "PH22202": "PH_DISCHARGE", "PH_TRANSFER_OUT": "PH_DISCHARGE",
+}
+
+# Phase -> executing ISA-88 unit (used when a tag itself does not identify a unit)
+ISA88_PHASE_UNIT_MAP: Dict[str, str] = {
+    "PH_SUPPLYMILK": "MIX01",
+    "PH_SUPPLYSUGAR": "MIX01",
+    "PH_SUPPLYADDITIVE": "MIX01",
+    "PH_DOSING": "MIX01",
+    "PH_MIXING": "MIX01",
+    "PH_HEATING": "HEATER01",
+    "PH_COOLING": "COOLER01",
+    "PH_DISCHARGE": "OUT01",
+}
+
+# Ordered tag-name patterns -> unit (first match wins; most specific first)
+_ISA88_TAG_UNIT_PATTERNS: Tuple[Tuple[Tuple[str, ...], str], ...] = (
+    (("TANK-01", "TANK_01", "TK01", "SILO01"), "TK01"),
+    (("TANK-02", "TANK_02", "TK02", "SILO02"), "TK02"),
+    (("TANK-03", "TANK_03", "TK03", "SILO03"), "TK03"),
+    (("WEIGH1", "WEIGH01", "WEIGH_1"), "WEIGH01"),
+    (("WEIGH2", "WEIGH02", "WEIGH_2"), "WEIGH02"),
+    (("WEIGH3", "WEIGH03", "WEIGH_3"), "WEIGH03"),
+    (("OUT_WEIGHT", "OUT01", "DISCHARGE", "FINISHED"), "OUT01"),
+    (("COOL", "CHILL", "COLD"), "COOLER01"),
+    (("HEAT", "STERIL", "UHT", "PASTEUR", "SSR"), "HEATER01"),
+    (("MIX", "AGITAT", "MOTOR_SPEED"), "MIX01"),
+)
+
+ISA88_PROCESS_CELL_ID = "Milk_Production_Cell_01"
+
+# Runtime flag: True once dbo.PLC_Datalog is verified to carry the ISA-88 columns
+PLC_DATALOG_ISA88_READY: bool = False
+_isa88_last_check_time: float = 0.0
+
+
+def normalize_isa88_phase_id(raw_phase: Any) -> Optional[str]:
+    """
+    Normalizes a raw STATUS_CURRENT_PHASE value (int pointer, PCS 7 step name,
+    or PH_* string) to a canonical ISA-88 Phase_ID. Returns None when unknown/idle.
+    """
+    if raw_phase is None or isinstance(raw_phase, bool):
+        return None
+    if isinstance(raw_phase, (int, float)):
+        code = int(raw_phase)
+        phase = ISA88_PHASE_CODE_MAP.get(code)
+        return None if (phase is None or phase == "PH_IDLE") else phase
+    text = str(raw_phase).strip().upper().replace(" ", "_")
+    if not text or text in ("NONE", "NULL", "--", "IDLE", "PH_IDLE"):
+        return None
+    if text.isdigit():
+        return normalize_isa88_phase_id(int(text))
+    if text in ISA88_PHASE_ALIASES:
+        return ISA88_PHASE_ALIASES[text]
+    if not text.startswith("PH_"):
+        text = f"PH_{text}"
+    return ISA88_PHASE_ALIASES.get(text, text)
+
+
+def resolve_isa88_unit_id(tag_name: Optional[str], phase_id: Optional[str] = None) -> str:
+    """
+    Resolves the ISA-88 physical Unit_ID for a telemetry tag.
+    1. Tag name identifies its unit (e.g. TANK_02_LEVEL -> TK02, Mixing_Temp_PV -> MIX01).
+    2. Otherwise the unit executing the active phase (PH_HEATING -> HEATER01).
+    3. Otherwise the process cell itself (cell-level / shared tags).
+    """
+    name = str(tag_name or "").upper()
+    for patterns, unit in _ISA88_TAG_UNIT_PATTERNS:
+        if any(p in name for p in patterns):
+            return unit
+    if phase_id and phase_id in ISA88_PHASE_UNIT_MAP:
+        return ISA88_PHASE_UNIT_MAP[phase_id]
+    return ISA88_PROCESS_CELL_ID
+
+
+def ensure_plc_datalog_isa88_columns(force: bool = False) -> bool:
+    """
+    Startup auto-migration: guarantees dbo.PLC_Datalog carries Batch_ID / Unit_ID / Phase_ID.
+    Additive and idempotent (ALTER TABLE ... ADD NULL only); never rewrites existing rows.
+    Re-probes at most every 60s while the database is unreachable.
+    """
+    global PLC_DATALOG_ISA88_READY, _isa88_last_check_time
+    if PLC_DATALOG_ISA88_READY and not force:
+        return True
+    now = time.time()
+    if not force and (now - _isa88_last_check_time) < 60.0:
+        return PLC_DATALOG_ISA88_READY
+    _isa88_last_check_time = now
+
+    conn = get_connection(timeout=3)
+    if not conn:
+        return False
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT OBJECT_ID('dbo.PLC_Datalog', 'U')")
+        row = cursor.fetchone()
+        if not row or row[0] is None:
+            return False
+        for col_name, col_spec in ISA88_CONTEXT_COLUMNS:
+            cursor.execute(f"""
+            IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.PLC_Datalog') AND name = '{col_name}')
+                ALTER TABLE dbo.PLC_Datalog ADD {col_name} {col_spec};
+            """)
+        # Batch-scoped retrieval index for EBR / BatchML serialization
+        cursor.execute("""
+        IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_PLC_Datalog_Batch_Phase' AND object_id = OBJECT_ID('dbo.PLC_Datalog'))
+            CREATE NONCLUSTERED INDEX IX_PLC_Datalog_Batch_Phase ON dbo.PLC_Datalog (Batch_ID, Phase_ID, ReadTime);
+        """)
+        conn.commit()
+        PLC_DATALOG_ISA88_READY = True
+        logger.info("[ISA-88] dbo.PLC_Datalog batch context columns verified (Batch_ID, Unit_ID, Phase_ID).")
+        return True
+    except Exception as e:
+        logger.warning(f"[ISA-88] PLC_Datalog context migration notice: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def build_plc_datalog_insert_sql(with_read_time_param: bool = False) -> Tuple[str, bool]:
+    """
+    Returns (INSERT statement, has_isa88_context) matching the verified PLC_Datalog schema.
+    Parameter order: OrderCode, TagName, Value, Unit, [ReadTime], [Batch_ID, Unit_ID, Phase_ID]
+    """
+    ready = ensure_plc_datalog_isa88_columns()
+    time_col_val = "?" if with_read_time_param else "GETDATE()"
+    if ready:
+        return (
+            "INSERT INTO dbo.PLC_Datalog (OrderCode, TagName, Value, Unit, ReadTime, Batch_ID, Unit_ID, Phase_ID) "
+            f"VALUES (?, ?, ?, ?, {time_col_val}, ?, ?, ?)",
+            True,
+        )
+    return (
+        "INSERT INTO dbo.PLC_Datalog (OrderCode, TagName, Value, Unit, ReadTime) "
+        f"VALUES (?, ?, ?, ?, {time_col_val})",
+        False,
+    )
+
+
+def log_plc_datalog(
+    order_code: str,
+    tag_name: str,
+    value: float,
+    unit: Optional[str] = None,
+    batch_id: Optional[str] = None,
+    unit_id: Optional[str] = None,
+    phase_id: Optional[str] = None,
+) -> bool:
+    """Writes a telemetry snapshot into dbo.PLC_Datalog (with ISA-88 batch context when available)."""
     try:
         tag_unit = unit or ""
-        query = """
-        INSERT INTO PLC_Datalog (OrderCode, TagName, Value, Unit, ReadTime)
-        VALUES (?, ?, ?, ?, GETDATE())
-        """
-        return execute_query(query, (order_code, tag_name, float(value), tag_unit), timeout=2)
+        query, has_ctx = build_plc_datalog_insert_sql()
+        params: tuple = (order_code, tag_name, float(value), tag_unit)
+        if has_ctx:
+            norm_phase = normalize_isa88_phase_id(phase_id)
+            params += (
+                batch_id or order_code,
+                unit_id or resolve_isa88_unit_id(tag_name, norm_phase),
+                norm_phase,
+            )
+        return execute_query(query, params, timeout=2)
     except Exception as e:
         logger.debug(f"Failed to log PLC datalog: {e}")
         return False

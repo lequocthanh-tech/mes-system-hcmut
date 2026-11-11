@@ -207,7 +207,7 @@ export const ConfigProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         is_connected: false,
         connected: false,
         server_connected: false,
-        endpoint: 'opc.tcp://127.0.0.1:49320',
+        endpoint: gatewayStatus?.endpoint || 'opc.tcp://127.0.0.1:49320',
         latency_ms: 0,
         active_tags: 0,
       };
@@ -229,15 +229,15 @@ export const ConfigProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         setGatewayStatus(data);
       } catch {
         if (!isMounted) return;
-        setGatewayStatus({
+        setGatewayStatus((prev) => ({
           status: 'OFFLINE',
           is_connected: false,
           connected: false,
           server_connected: false,
-          endpoint: 'opc.tcp://127.0.0.1:49320',
+          endpoint: prev?.endpoint || 'opc.tcp://127.0.0.1:49320',
           latency_ms: 0,
           active_tags: 0,
-        });
+        }));
       }
     };
 

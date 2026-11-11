@@ -17,17 +17,34 @@ export interface Customer {
   activeOrdersCount?: number;
 }
 
-export type RecipeStatus = 'DRAFT' | 'RELEASED' | 'LOCKED' | 'Draft' | 'Released' | 'Locked';
+export type RecipeStatus = 'DRAFT' | 'RELEASED' | 'LOCKED' | 'TEST' | 'Draft' | 'Released' | 'Locked' | 'Test';
+
+/**
+ * Siemens PM-CONTROL Chapter 5.8 Product Batch Types:
+ * - 'NORMALIZED_ABSOLUTE' (Sec. 5.8.2): Normalizing base with absolute values (e.g., 5.0 L or 1000.0 L)
+ * - 'NORMALIZED_PERCENTAGE' (Sec. 5.8.3): Normalizing base with percentage values (%)
+ * - 'ABSOLUTE_FIXED' (Sec. 5.8.1): Product with fixed absolute values (Job Control does not scale)
+ */
+export type PmControlBatchType = 'NORMALIZED_ABSOLUTE' | 'NORMALIZED_PERCENTAGE' | 'ABSOLUTE_FIXED';
+
+/**
+ * Siemens PM-CONTROL Phase Parameter Scaling Rule:
+ * - 'SCALABLE': Material dosing parameters multiplied by Conversion Factor
+ * - 'FIXED': Thermal/mechanical process parameters kept constant regardless of batch size
+ */
+export type ParameterScalingRule = 'SCALABLE' | 'FIXED';
 
 export interface RecipeParameter {
   id: string;              // e.g. "param-1"
   phaseId: string;         // e.g. "PH_SUPPLYMILK", "PH_HEATING"
   parameterName: string;   // e.g. "Ingredient Raw Milk", "Thermal Process"
   targetValue: number;     // e.g. 70.0, 138.0
-  unit: string;            // e.g. "%", "°C", "RPM", "s"
+  unit: string;            // e.g. "%", "°C", "RPM", "s", "L", "kg"
   tolerance: string;       // e.g. "±1.0%", "±0.5°C"
   targetNodeId: string;    // e.g. "Recipe_Milk_SP", "Recipe_Temp_SP"
   durationSeconds?: number;
+  scalingRule?: ParameterScalingRule;
+  scaling_rule?: ParameterScalingRule;
   // Legacy & extended compatibility fields
   recipeId?: number;
   materialName?: string;
@@ -50,11 +67,85 @@ export interface MasterRecipe {
   parameters: RecipeParameter[];
   tempHot?: number;
   tempCold?: number;
+  // Siemens PM-CONTROL Chapter 5.8 Batch Type & Conversion Factor Metadata
+  batchType?: PmControlBatchType;
+  batch_type?: PmControlBatchType;
+  normalizingBase?: number;
+  normalizing_base?: number;
+  expectedLossPercent?: number;
+  expected_loss_percent?: number;
 }
 
 // Backward compatibility aliases
 export type RecipeMaster = MasterRecipe;
 export type RecipeDetail = RecipeParameter;
+
+/**
+ * Siemens PM-CONTROL Sec. 5.6 Recipe Version History Snapshot
+ */
+export interface RecipeVersionSnapshot {
+  version: string;
+  status: RecipeStatus;
+  timestamp: string;
+  author: string;
+  reason: string;
+  batchType?: PmControlBatchType;
+  batch_type?: PmControlBatchType;
+  normalizingBase?: number;
+  normalizing_base?: number;
+  expectedLossPercent?: number;
+  expected_loss_percent?: number;
+  tempHot?: number;
+  temp_hot?: number;
+  tempCold?: number;
+  temp_cold?: number;
+  parameters: RecipeParameter[];
+}
+
+/**
+ * IEC 61508 / PM-CONTROL Bidirectional Lifebit Watchdog Telemetry
+ */
+export interface WatchdogStatus {
+  status: 'HEALTHY' | 'DEGRADED' | 'WATCHDOG_TIMEOUT_SAFE_HOLD';
+  lifebit_pulse: boolean;
+  lifebit_counter: number;
+  latency_ms: number;
+  timeout_threshold_ms: number;
+  safe_hold_triggered: boolean;
+  consecutive_failures: number;
+  last_sync_utc: string;
+}
+
+/**
+ * Industrial AI In-Flight Dosing & Statistical Process Control (SPC)
+ */
+export interface AiDosingChannel {
+  channel_id: string;
+  channel_name: string;
+  material_code: string;
+  target_sp: number;
+  unit: string;
+  tolerance_percent: number;
+  usl: number;
+  lsl: number;
+  sample_count: number;
+  mean_error_kg: number;
+  std_dev_kg: number;
+  cpk: number;
+  status: 'CAPABLE' | 'DRIFT_DETECTED' | 'OUT_OF_SPEC';
+  recommended_offset_kg: number;
+  active_applied_offset_kg: number;
+  last_applied_at?: string;
+  last_applied_by?: string;
+  last_reason?: string;
+}
+
+export interface AiDosingAdvisorResponse {
+  timestamp: string;
+  channels: AiDosingChannel[];
+  global_status: string;
+  confidence_score: number;
+}
 
 export type WorkOrderStatus = 
   | 'NEW' 
@@ -78,6 +169,27 @@ export interface CalculatedSetpoint {
   calculatedValue: number; // e.g. 700.0, 200.0, 100.0, 138.0
   unit: string;            // e.g. "L", "kg", "°C"
   percentage?: number;
+  masterValue?: number;
+  masterUnit?: string;
+  scalingRule?: ParameterScalingRule;
+  conversionFactor?: number;
+  phaseId?: string;
+  targetNodeId?: string;
+}
+
+export interface PmControlJobSummary {
+  batchType: PmControlBatchType;
+  batchTypeLabel: string;
+  sectionRef: string;
+  normalizingBase: number;
+  normalizingBaseUnit: string;
+  targetQuantity: number;
+  conversionFactor: number;
+  conversionFormulaText: string;
+  totalRawMaterialInput: number;
+  expectedNetOutputVolume: number;
+  expectedLossVolume: number;
+  expectedLossPercent: number;
 }
 
 export interface WorkOrder {

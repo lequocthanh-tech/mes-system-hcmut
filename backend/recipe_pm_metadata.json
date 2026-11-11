@@ -1,0 +1,197 @@
+{
+  "1": {
+    "batch_type": "NORMALIZED_PERCENTAGE",
+    "normalizing_base": 100.0,
+    "expected_loss_percent": 0.0,
+    "version": "v2.0",
+    "status": "RELEASED",
+    "temp_hot": 75.0,
+    "temp_cold": 4.0,
+    "updated_at": "2026-10-30T21:06:53.602046",
+    "version_history": [
+      {
+        "version": "v2.0",
+        "status": "RELEASED",
+        "timestamp": "2026-10-30T21:06:53.602046",
+        "author": "Process_Engineer",
+        "reason": "Baseline Approved Master Recipe",
+        "batch_type": "NORMALIZED_PERCENTAGE",
+        "normalizing_base": 100.0,
+        "expected_loss_percent": 0.0,
+        "temp_hot": 75.0,
+        "temp_cold": 4.0,
+        "parameters": [
+          {
+            "id": "p-20",
+            "phaseId": "PH_DOSING",
+            "parameterName": "Dosing Dosing Sữa tươi nguyên liệu",
+            "targetValue": 70.0,
+            "unit": "%",
+            "tolerance": "±2.0%",
+            "scaling_rule": "SCALABLE",
+            "scalingRule": "SCALABLE"
+          },
+          {
+            "id": "p-21",
+            "phaseId": "PH_DOSING",
+            "parameterName": "Dosing Dosing Đường tinh luyện RE",
+            "targetValue": 20.0,
+            "unit": "%",
+            "tolerance": "±1.5%",
+            "scaling_rule": "SCALABLE",
+            "scalingRule": "SCALABLE"
+          },
+          {
+            "id": "p-22",
+            "phaseId": "PH_DOSING",
+            "parameterName": "Dosing Dosing Phụ gia vi chất & Cacao",
+            "targetValue": 10.0,
+            "unit": "%",
+            "tolerance": "±2.0%",
+            "scaling_rule": "SCALABLE",
+            "scalingRule": "SCALABLE"
+          },
+          {
+            "id": "p-hot-1",
+            "phaseId": "PH_HEATING",
+            "parameterName": "Pasteurization / Sterilization Temp",
+            "targetValue": 75.0,
+            "unit": "°C",
+            "tolerance": "±1.0°C",
+            "scaling_rule": "FIXED",
+            "scalingRule": "FIXED",
+            "tagName": "Recipe_Temp_SP",
+            "targetNodeId": "ns=2;s=Channel1.Device1.Recipe_Temp_SP"
+          },
+          {
+            "id": "p-cold-1",
+            "phaseId": "PH_COOLING",
+            "parameterName": "Chilling / Storage Target Temp",
+            "targetValue": 4.0,
+            "unit": "°C",
+            "tolerance": "±0.5°C",
+            "scaling_rule": "FIXED",
+            "scalingRule": "FIXED",
+            "tagName": "Cooling_Temp_SP",
+            "targetNodeId": "ns=2;s=Channel1.Device1.Cooling_Temp_SP"
+          }
+        ]
+      }
+    ]
+  },
+  "ID-1": {
+    "batch_type": "NORMALIZED_PERCENTAGE",
+    "normalizing_base": 100.0,
+    "expected_loss_percent": 0.0,
+    "version": "v2.0",
+    "status": "RELEASED",
+    "temp_hot": 75.0,
+    "temp_cold": 4.0,
+    "updated_at": "2026-10-30T21:06:53.667840",
+    "version_history": [
+      {
+        "version": "v2.0",
+        "status": "RELEASED",
+        "timestamp": "2026-10-30T21:06:53.667840",
+        "author": "QC_Auditor",
+        "reason": "Rollback to v2.0: Reverting pilot batch back to approved baseline",
+        "batch_type": "NORMALIZED_PERCENTAGE",
+        "normalizing_base": 100.0,
+        "expected_loss_percent": 0.0,
+        "temp_hot": 75.0,
+        "temp_cold": 4.0,
+        "parameters": [
+          {
+            "id": "p-20",
+            "phaseId": "PH_DOSING",
+            "parameterName": "Dosing Dosing Sữa tươi nguyên liệu",
+            "targetValue": 70.0,
+            "unit": "%",
+            "tolerance": "±2.0%",
+            "scaling_rule": "SCALABLE",
+            "scalingRule": "SCALABLE"
+          },
+          {
+            "id": "p-21",
+            "phaseId": "PH_DOSING",
+            "parameterName": "Dosing Dosing Đường tinh luyện RE",
+            "targetValue": 20.0,
+            "unit": "%",
+            "tolerance": "±1.5%",
+            "scaling_rule": "SCALABLE",
+            "scalingRule": "SCALABLE"
+          },
+          {
+            "id": "p-22",
+            "phaseId": "PH_DOSING",
+            "parameterName": "Dosing Dosing Phụ gia vi chất & Cacao",
+            "targetValue": 10.0,
+            "unit": "%",
+            "tolerance": "±2.0%",
+            "scaling_rule": "SCALABLE",
+            "scalingRule": "SCALABLE"
+          },
+          {
+            "id": "p-hot-1",
+            "phaseId": "PH_HEATING",
+            "parameterName": "Pasteurization / Sterilization Temp",
+            "targetValue": 75.0,
+            "unit": "°C",
+            "tolerance": "±1.0°C",
+            "scaling_rule": "FIXED",
+            "scalingRule": "FIXED",
+            "tagName": "Recipe_Temp_SP",
+            "targetNodeId": "ns=2;s=Channel1.Device1.Recipe_Temp_SP"
+          },
+          {
+            "id": "p-cold-1",
+            "phaseId": "PH_COOLING",
+            "parameterName": "Chilling / Storage Target Temp",
+            "targetValue": 4.0,
+            "unit": "°C",
+            "tolerance": "±0.5°C",
+            "scaling_rule": "FIXED",
+            "scalingRule": "FIXED",
+            "tagName": "Cooling_Temp_SP",
+            "targetNodeId": "ns=2;s=Channel1.Device1.Cooling_Temp_SP"
+          }
+        ]
+      },
+      {
+        "version": "v1.3-TEST",
+        "status": "TEST",
+        "timestamp": "2026-10-30T21:06:53.603299",
+        "author": "Lead_Engineer",
+        "reason": "Pilot testing of sweetener reduction",
+        "batch_type": "NORMALIZED_PERCENTAGE",
+        "normalizing_base": 100.0,
+        "expected_loss_percent": 0.5,
+        "temp_hot": 138.0,
+        "temp_cold": 4.0,
+        "parameters": [
+          {
+            "phaseId": "PH_SUPPLYMILK",
+            "materialCode": "RAW_MILK",
+            "parameterName": "Sữa tươi",
+            "targetValue": 86.0,
+            "tolerance": "±0.5%"
+          },
+          {
+            "phaseId": "PH_SUPPLYSUGAR",
+            "materialCode": "SUGAR_PREMIX",
+            "parameterName": "Đường tinh luyện",
+            "targetValue": 9.0,
+            "tolerance": "±0.5%"
+          },
+          {
+            "phaseId": "PH_SUPPLYADDITIVE",
+            "materialCode": "VITAMIN_EMULSION",
+            "parameterName": "Vi chất dinh dưỡng",
+            "targetValue": 5.0,
+            "tolerance": "±0.5%"
+          }
+        ]
+      }
+    ]
+  }
+}

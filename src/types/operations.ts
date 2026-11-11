@@ -33,7 +33,9 @@ export type Isa88BatchState =
   | 'READY'
   | 'STARTING'
   | 'COMPLETING'
-  | 'COMPLETED';
+  | 'COMPLETED'
+  | 'AWAITING_DRAIN'
+  | 'WAITING_DRAIN';
 
 export interface Isa88StateMeta {
   id: Isa88StateCode;
@@ -210,6 +212,17 @@ export function getIsa88State(stateIdOrName: number | string | undefined | null)
         borderClass: 'border-sky-500',
         bgClass: 'bg-sky-500',
       };
+    case 'AWAITING_DRAIN':
+    case 'WAITING_DRAIN':
+      return {
+        id: 2,
+        name: 'HELD',
+        label: 'CHỜ XẢ BỒN OUTPUT',
+        color: '#D97706',
+        badgeClass: 'bg-amber-50 text-amber-800 border border-amber-400 animate-pulse',
+        borderClass: 'border-amber-500',
+        bgClass: 'bg-amber-500',
+      };
     case 'NEW':
       return {
         id: 0,
@@ -260,10 +273,18 @@ export interface ScadaSetpointVerification {
   tagName: string;
   phaseId?: string;
   scriptedSetpoint: number;
-  scadaActualReadback: number;
+  scadaActualReadback: number | null;
   unit: string;
   tolerance: number;
-  status: 'Matched' | 'In Progress' | 'Deviating' | 'Discrepancy';
+  status:
+    | 'UNMAPPED'
+    | 'MATCHED (IN TOLERANCE)'
+    | 'RAMPING / DOSING'
+    | 'DEVIATING / OVERSHOOT'
+    | 'Matched'
+    | 'In Progress'
+    | 'Deviating'
+    | 'Discrepancy';
   timestamp: string;
 }
 
@@ -377,7 +398,22 @@ export const EXECUTION_MODE_OPTIONS: ExecutionModeOption[] = [
   }
 ];
 
-export type DeviationStatus = 'MATCHED' | 'DEVIATING' | 'TRACKING' | 'CHƯA ÁNH XẠ';
+export type StateSourceType = 'PLC_HARDWARE' | 'VIRTUAL_SIM_FALLBACK';
+
+export type SpTrackingStatus =
+  | 'UNMAPPED'
+  | 'MATCHED (IN TOLERANCE)'
+  | 'RAMPING / DOSING'
+  | 'DEVIATING / OVERSHOOT';
+
+export type TwinSyncStatus = 'UNMAPPED' | 'TWIN_SYNCHRONIZED' | 'TWIN_DRIFT';
+
+export type DeviationStatus =
+  | SpTrackingStatus
+  | 'MATCHED'
+  | 'DEVIATING'
+  | 'TRACKING'
+  | 'CHƯA ÁNH XẠ';
 
 export interface DigitalTwinDeviationRow {
   id: string;
@@ -388,17 +424,27 @@ export interface DigitalTwinDeviationRow {
   pvHardware: number | null;
   pvSimit: number | null;
   delta: number | null;
+  deltaSp?: number | null;
+  absDeltaSp?: number | null;
+  deltaTwin?: number | null;
   tolerance: number;
   status: DeviationStatus;
+  spTrackingStatus?: SpTrackingStatus;
+  twinSyncStatus?: TwinSyncStatus;
+  parameterFidelity?: number | null;
   c1Mapped: boolean;
   c2Mapped: boolean;
 }
 
 export interface DualRunBenchmarkSummary {
   mappedParameters: number;
+  mappedTwinParameters?: number;
   matchedParameters: number;
+  synchronizedParameters?: number;
   totalParameters: number;
   fidelityIndex: number | null;
+  stateSource?: StateSourceType;
+  virtualStateFallback?: boolean;
   tHardwareSec: number | null;
   tHardwareFormatted: string;
   tSimitSec: number | null;

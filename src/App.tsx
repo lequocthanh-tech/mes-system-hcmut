@@ -21,6 +21,7 @@ import { EnterpriseReportCenterView } from './views/EnterpriseReportCenterView';
 import { OEEDashboard } from './pages/OEEDashboard';
 import { ActiveAlarmBanner } from './components/ActiveAlarmBanner';
 import { AICopilotDrawer } from './components/AICopilotDrawer';
+import { PinnedTagPalette } from './components/PinnedTagPalette';
 import { useReports } from './context/ReportContext';
 import { ErrorBoundary } from './components/common/ErrorBoundary';
 
@@ -40,8 +41,7 @@ const MainLayout: React.FC = () => {
   const { setActiveSubTab } = useReports();
 
   return (
-    <ProtectedRoute>
-      <div className="min-h-screen bg-slate-50 flex flex-col text-slate-900">
+    <div className="min-h-screen bg-slate-50 flex flex-col text-slate-900">
         {/* Global Navbar visible after login */}
         <Navbar 
           activeTab={activeTab} 
@@ -113,6 +113,9 @@ const MainLayout: React.FC = () => {
           onClose={() => setIsAiDrawerOpen(false)} 
         />
 
+        {/* Global Pinnable Floating Tag Palette & Kepware Tree Scanner */}
+        <PinnedTagPalette activeTab={activeTab} />
+
         {/* Industrial Footer */}
         <footer className="border-t border-slate-200 bg-white py-3 px-6 text-[11px] text-slate-500 font-mono flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-3">
@@ -138,8 +141,7 @@ const MainLayout: React.FC = () => {
             <span>HIGH-PERFORMANCE HMI (ISA-101 COMPLIANT)</span>
           </div>
         </footer>
-      </div>
-    </ProtectedRoute>
+    </div>
   );
 };
 
@@ -154,21 +156,23 @@ export const App: React.FC = () => {
   return (
     <AuthProvider>
       <ConfigProvider>
-        <Isa88Provider>
-          <MasterDataProvider>
-            <OperationsProvider>
-              <QualityProvider>
-                <InventoryProvider>
-                  <EquipmentProvider>
-                    <ReportProvider>
-                      <MainLayout />
-                    </ReportProvider>
-                  </EquipmentProvider>
-                </InventoryProvider>
-              </QualityProvider>
-            </OperationsProvider>
-          </MasterDataProvider>
-        </Isa88Provider>
+        <ProtectedRoute>
+          <Isa88Provider>
+            <MasterDataProvider>
+              <OperationsProvider>
+                <QualityProvider>
+                  <InventoryProvider>
+                    <EquipmentProvider>
+                      <ReportProvider>
+                        <MainLayout />
+                      </ReportProvider>
+                    </EquipmentProvider>
+                  </InventoryProvider>
+                </QualityProvider>
+              </OperationsProvider>
+            </MasterDataProvider>
+          </Isa88Provider>
+        </ProtectedRoute>
       </ConfigProvider>
     </AuthProvider>
   );

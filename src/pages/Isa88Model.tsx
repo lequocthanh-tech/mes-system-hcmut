@@ -24,8 +24,12 @@ import {
   FolderOpen,
   RotateCcw,
   Download,
-  Upload
+  Upload,
+  FileCode,
+  ShieldCheck,
+  Activity
 } from 'lucide-react';
+import { extractDroppedOpcTag } from '../components/PinnedTagPalette';
 import {
   getIsa88Hierarchy,
   createCustomIsa88Tag,
@@ -42,11 +46,17 @@ import {
   probeAllMappedTags,
   exportIsa88TagMappings,
   importIsa88TagMappings,
+  getIsaIngestionMetrics,
+  getIsaCybersecurityPosture,
+  instantiateAssetTemplate,
+  getTiaPortalUdtScl,
   Isa88HierarchyUnit,
   Isa88HierarchyModule,
   Isa88HierarchyTag,
-  AssetTemplate
+  AssetTemplate,
+  IsaIngestionMetrics
 } from '../services/api';
+import { useSafeIsa88 } from '../context/Isa88Context';
 
 type SelectionContext = {
   type: 'unit' | 'module';
@@ -57,6 +67,123 @@ type SelectionContext = {
 };
 
 export const Isa88Model: React.FC = () => {
+  const isa88Ctx = useSafeIsa88();
+  const contextTelemetryMap = isa88Ctx?.telemetryMap;
+
+  // Real-time WebSocket Telemetry State for <100ms instant updates without page refresh
+  const [wsTelemetryMap, setWsTelemetryMap] = useState<
+    Record<string, { value: any; quality: string; timestamp?: string }>
+  >({});
+  const [streamActive, setStreamActive] = useState<boolean>(false);
+
+  // Connect to backend WebSocket (/ws/telemetry) with automatic reconnection
+  useEffect(() => {
+    let isMounted = true;
+    let ws: WebSocket | null = null;
+    let reconnectTimer: any = null;
+
+    const connectWebSocket = () => {
+      if (!isMounted) return;
+      try {
+        const host = window.location.hostname || '127.0.0.1';
+        ws = new WebSocket(`ws://${host}:8000/ws/telemetry`);
+
+        ws.onopen = () => {
+          if (!isMounted) return;
+          setStreamActive(true);
+        };
+
+        ws.onmessage = (event) => {
+          if (!isMounted) return;
+          try {
+            const msg = JSON.parse(event.data);
+            if (msg.type === 'TAG_UPDATE' && msg.data) {
+              const d = msg.data;
+              const entry = {
+                value: d.value,
+                quality: d.quality || 'Good',
+                timestamp: d.timestamp || new Date().toLocaleTimeString()
+              };
+              setWsTelemetryMap((prev) => {
+                const next = { ...prev };
+                if (d.node_id) {
+                  next[d.node_id] = entry;
+                  const clean = d.node_id.replace(/^ns=\d+;s=/, '').trim();
+                  if (clean) next[clean] = entry;
+                }
+                if (d.tag_name) {
+                  next[d.tag_name] = entry;
+                }
+                return next;
+              });
+            } else if (msg.type === 'TAGS_BATCH' && msg.tags) {
+              setWsTelemetryMap((prev) => {
+                const next = { ...prev };
+                Object.entries(msg.tags).forEach(([nid, t]: [string, any]) => {
+                  const entry = {
+                    value: t.value,
+                    quality: t.quality || 'Good',
+                    timestamp: t.timestamp || new Date().toLocaleTimeString()
+                  };
+                  next[nid] = entry;
+                  const clean = nid.replace(/^ns=\d+;s=/, '').trim();
+                  if (clean) next[clean] = entry;
+                  if (t.tag_name) next[t.tag_name] = entry;
+                });
+                return next;
+              });
+            } else if (msg.type === 'SNAPSHOT' && Array.isArray(msg.tags)) {
+              setWsTelemetryMap((prev) => {
+                const next = { ...prev };
+                msg.tags.forEach((t: any) => {
+                  const entry = {
+                    value: t.value,
+                    quality: t.quality || 'Good',
+                    timestamp: t.timestamp || new Date().toLocaleTimeString()
+                  };
+                  if (t.node_id) {
+                    next[t.node_id] = entry;
+                    const clean = t.node_id.replace(/^ns=\d+;s=/, '').trim();
+                    if (clean) next[clean] = entry;
+                  }
+                  if (t.tag_name) next[t.tag_name] = entry;
+                });
+                return next;
+              });
+            }
+          } catch {
+            // ignore non-json messages
+          }
+        };
+
+        ws.onclose = () => {
+          if (isMounted) {
+            setStreamActive(false);
+            reconnectTimer = setTimeout(connectWebSocket, 2000);
+          }
+        };
+
+        ws.onerror = () => {
+          try { ws?.close(); } catch {}
+        };
+      } catch {
+        if (isMounted) {
+          reconnectTimer = setTimeout(connectWebSocket, 3000);
+        }
+      }
+    };
+
+    connectWebSocket();
+
+    return () => {
+      isMounted = false;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (ws) {
+        try { ws.close(); } catch {}
+      }
+    };
+  }, []);
+
   // Hierarchy Data State
   const [hierarchy, setHierarchy] = useState<Isa88HierarchyUnit[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
@@ -126,6 +253,34 @@ export const Isa88Model: React.FC = () => {
   const [autoUnitName, setAutoUnitName] = useState<string>('');
   const [autoPrefix, setAutoPrefix] = useState<string>('');
   const [isGeneratingUnit, setIsGeneratingUnit] = useState<boolean>(false);
+
+  // ISA-95 Dual-Speed Ingestion & Cybersecurity Telemetry State
+  const [ingestionMetrics, setIngestionMetrics] = useState<IsaIngestionMetrics | null>(null);
+  const [cyberPosture, setCyberPosture] = useState<any | null>(null);
+
+  // Siemens TIA Portal SCL Export State
+  const [isExportingScl, setIsExportingScl] = useState<boolean>(false);
+  const [sclModalOpen, setSclModalOpen] = useState<boolean>(false);
+  const [sclCode, setSclCode] = useState<string>('');
+
+  // Standardized ISA-88 Asset Template Generator State
+  const [isAssetTemplateModalOpen, setIsAssetTemplateModalOpen] = useState<boolean>(false);
+  const [selectedAssetTemplateCode, setSelectedAssetTemplateCode] = useState<string>('TANK_STORAGE');
+  const [assetInstanceCode, setAssetInstanceCode] = useState<string>('TK04');
+  const [assetInstanceName, setAssetInstanceName] = useState<string>('Storage Silo Tank 04');
+  const [assetLineCode, setAssetLineCode] = useState<string>('Line01');
+  const [assetCellId, setAssetCellId] = useState<string>('Cell1_Real');
+  const [isInstantiatingAsset, setIsInstantiatingAsset] = useState<boolean>(false);
+
+  const STANDARD_TEMPLATES_CATALOG = [
+    { code: 'TANK_STORAGE', name: 'Khuôn Mẫu Bồn Chứa (Storage Silo / Buffer Tank)', type: 'UNIT', tags: 6 },
+    { code: 'UNIT_MIXER', name: 'Khuôn Mẫu Bồn Khuấy Trộn (Central Mixing Vessel)', type: 'UNIT', tags: 7 },
+    { code: 'UNIT_UHT_HEATER', name: 'Khuôn Mẫu Trạm Tiệt Trùng UHT (Thermal Pasteurizer)', type: 'UNIT', tags: 8 },
+    { code: 'UNIT_COOLER', name: 'Khuôn Mẫu Trạm Làm Lạnh Nhanh (Plate Chiller Unit)', type: 'UNIT', tags: 5 },
+    { code: 'EM_DOSING_PUMP', name: 'Equipment Module: Bơm Định Lượng (Metering Pump)', type: 'EM', tags: 5 },
+    { code: 'CM_VALVE_ONOFF', name: 'Control Module: Van Đóng Mở Khí Nén (Pneumatic Valve)', type: 'CM', tags: 4 },
+    { code: 'CM_MOTOR_AGITATOR', name: 'Control Module: Động Cơ Cánh Khuấy (Agitator VFD Motor)', type: 'CM', tags: 5 },
+  ];
 
   // Clipboard copy state
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
@@ -278,15 +433,89 @@ export const Isa88Model: React.FC = () => {
     }
   };
 
+  // Load ISA-95 Ingestion Metrics and Cybersecurity Posture
+  const loadPipelineAndSecurityMetrics = useCallback(async () => {
+    try {
+      const [metrics, posture] = await Promise.all([
+        getIsaIngestionMetrics().catch(() => null),
+        getIsaCybersecurityPosture().catch(() => null)
+      ]);
+      if (metrics) setIngestionMetrics(metrics);
+      if (posture && posture.data) setCyberPosture(posture.data);
+    } catch {
+      // Non-fatal
+    }
+  }, []);
+
+  const handleExportTiaPortalScl = async () => {
+    setIsExportingScl(true);
+    setErrorMessage(null);
+    try {
+      const res = await getTiaPortalUdtScl(false);
+      if (res && res.content) {
+        setSclCode(res.content);
+        setSclModalOpen(true);
+      } else {
+        setErrorMessage('Không nhận được nội dung mã SCL từ máy chủ.');
+      }
+    } catch (e: any) {
+      setErrorMessage(e.message || 'Không thể tạo mã nguồn TIA Portal SCL');
+    } finally {
+      setIsExportingScl(false);
+    }
+  };
+
+  const handleDownloadTiaPortalScl = async () => {
+    try {
+      await getTiaPortalUdtScl(true);
+      setSuccessBanner('Đã tải xuống tệp DB_OPC_Gateway.scl thành công!');
+    } catch (e: any) {
+      setErrorMessage(e.message || 'Không thể tải xuống tệp SCL');
+    }
+  };
+
+  const handleInstantiateAsset = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!assetInstanceCode.trim()) {
+      setErrorMessage('Vui lòng nhập Mã Thiết Bị (Instance Code)');
+      return;
+    }
+    setIsInstantiatingAsset(true);
+    setErrorMessage(null);
+    try {
+      const res = await instantiateAssetTemplate({
+        template_code: selectedAssetTemplateCode,
+        instance_code: assetInstanceCode.trim().toUpperCase(),
+        instance_name: assetInstanceName.trim() || undefined,
+        line_code: assetLineCode.trim() || 'Line01',
+        cell_id: assetCellId
+      });
+      setSuccessBanner(res.message || `Đã khởi tạo thành công thiết bị ${assetInstanceCode} (${res.generated_tags_count} tags)!`);
+      setIsAssetTemplateModalOpen(false);
+      await loadHierarchyData(true);
+      loadPipelineAndSecurityMetrics();
+    } catch (e: any) {
+      setErrorMessage(e.message || 'Lỗi khởi tạo thiết bị từ khuôn mẫu');
+    } finally {
+      setIsInstantiatingAsset(false);
+    }
+  };
+
   useEffect(() => {
     loadHierarchyData();
+    loadPipelineAndSecurityMetrics();
     getAssetTemplates()
       .then((t) => {
         setTemplates(t);
         if (t.length > 0) setSelectedTemplateId(t[0].template_id);
       })
       .catch(() => {});
-  }, [loadHierarchyData]);
+
+    const timer = setInterval(() => {
+      loadPipelineAndSecurityMetrics();
+    }, 10000);
+    return () => clearInterval(timer);
+  }, [loadHierarchyData, loadPipelineAndSecurityMetrics]);
 
   // Toggle unit expand/collapse
   const toggleUnitExpand = (unitId: string) => {
@@ -511,6 +740,67 @@ export const Isa88Model: React.FC = () => {
     }
   };
 
+  // Drag-and-Drop State & Handlers (Pinnable Kepware Tag Palette)
+  const [dragOverTarget, setDragOverTarget] = useState<string | null>(null);
+
+  const handleDropOnTagRow = async (e: React.DragEvent, tagName: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOverTarget(null);
+    const dropped = extractDroppedOpcTag(e);
+    if (!dropped || !dropped.node_id) return;
+
+    try {
+      await updateTagNodeId(tagName, dropped.node_id);
+      setSuccessBanner(`✔ Đã ánh xạ kéo-thả Tag [${tagName}] ← ${dropped.node_id} và lưu vĩnh viễn vào SQL Server & tag_mappings.json!`);
+      await loadHierarchyData(true);
+      setTimeout(() => setSuccessBanner(null), 5000);
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Lỗi khi ánh xạ kéo-thả Node ID');
+    }
+  };
+
+  const handleDropOnModule = async (e: React.DragEvent, unitId: string, emId: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOverTarget(null);
+    const dropped = extractDroppedOpcTag(e);
+    if (!dropped || !dropped.node_id) return;
+
+    const cleanSuffix = (dropped.name || dropped.node_id.split('.').pop() || 'TAG')
+      .replace(/[^A-Za-z0-9_]/g, '_')
+      .toUpperCase();
+    const generatedTagName = `${unitId.replace('-', '')}_${cleanSuffix}`;
+    const dt = dropped.data_type || 'Float';
+    const isBool = dt.toLowerCase().includes('bool');
+
+    try {
+      await createCustomIsa88Tag({
+        unit_id: unitId,
+        em_id: emId,
+        tag_name: generatedTagName,
+        node_id: dropped.node_id,
+        data_type: isBool ? 'Bool' : 'Float',
+        unit: isBool ? '' : 'L',
+        role: isBool ? 'STATE' : 'PV',
+        description: `Auto-mapped from Kepware Tree (${dropped.path || dropped.node_id})`,
+      });
+      setSuccessBanner(`✔ Đã tạo & gán Tag mới [${generatedTagName}] ← ${dropped.node_id} vào Module [${emId}]!`);
+      await loadHierarchyData(true);
+      setTimeout(() => setSuccessBanner(null), 5000);
+    } catch (err: any) {
+      // If tag already exists, update its node_id instead
+      try {
+        await updateTagNodeId(generatedTagName, dropped.node_id);
+        setSuccessBanner(`✔ Đã cập nhật Tag [${generatedTagName}] ← ${dropped.node_id} trong Module [${emId}]!`);
+        await loadHierarchyData(true);
+        setTimeout(() => setSuccessBanner(null), 5000);
+      } catch (innerErr: any) {
+        setErrorMessage(innerErr.message || err.message || 'Lỗi khi thả Tag vào Module');
+      }
+    }
+  };
+
   // Probe single node
   const handleProbeNode = async (nodeId: string) => {
     if (!nodeId) return;
@@ -628,6 +918,22 @@ export const Isa88Model: React.FC = () => {
             <span>ĐỒNG BỘ XUYÊN MODULE (AUTO-SYNC)</span>
           </div>
 
+          <div
+            className={`h-9 px-3 border font-semibold text-[11px] uppercase tracking-wider flex items-center gap-1.5 rounded-xs shadow-xs transition-colors ${
+              streamActive
+                ? 'bg-emerald-50 border-emerald-300 text-emerald-800'
+                : 'bg-slate-100 border-slate-300 text-slate-600'
+            }`}
+            title="Kênh truyền dữ liệu thời gian thực Kepware OPC UA WebSocket (/ws/telemetry)"
+          >
+            <span
+              className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                streamActive ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'
+              }`}
+            />
+            <span>{streamActive ? 'OPC TELEMETRY: REALTIME (<100ms)' : 'OPC TELEMETRY: CONNECTING...'}</span>
+          </div>
+
           <button
             type="button"
             onClick={handleProbeAllMapped}
@@ -691,12 +997,86 @@ export const Isa88Model: React.FC = () => {
 
           <button
             type="button"
-            onClick={() => setIsAutoModalOpen(true)}
-            className="h-9 px-3.5 bg-white border border-emerald-600 hover:bg-emerald-50 text-emerald-800 font-semibold uppercase tracking-wider flex items-center gap-1.5 rounded-xs transition-all shadow-xs hallmark-focus active:translate-y-px"
+            onClick={handleExportTiaPortalScl}
+            disabled={isExportingScl}
+            className="h-9 px-3 bg-white border border-indigo-600 hover:bg-indigo-50 text-indigo-900 font-semibold uppercase tracking-wider flex items-center gap-1.5 rounded-xs transition-all shadow-xs hallmark-focus active:translate-y-px disabled:opacity-50"
+            title="Xuất mã nguồn Siemens TIA Portal SCL (DB_OPC_Gateway.scl) chứa UDTs và Global DB non-optimized"
           >
-            <Plus className="w-3.5 h-3.5 text-emerald-600" />
-            <span>KHỞI TẠO UNIT MẪU</span>
+            <FileCode className={`w-3.5 h-3.5 text-indigo-600 ${isExportingScl ? 'animate-spin' : ''}`} />
+            <span>{isExportingScl ? 'ĐANG TẠO SCL...' : 'EXPORT TIA PORTAL SCL'}</span>
           </button>
+
+          <button
+            type="button"
+            onClick={() => setIsAssetTemplateModalOpen(true)}
+            className="h-9 px-3.5 bg-emerald-700 hover:bg-emerald-800 text-white font-semibold uppercase tracking-wider flex items-center gap-1.5 rounded-xs transition-all shadow-xs hallmark-focus active:translate-y-px"
+            title="Khởi tạo thiết bị chuẩn ISA-88 từ khuôn mẫu và tự động sinh tags + Kepware NodeIDs"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            <span>+ AUTO-GENERATE ASSET (TEMPLATE)</span>
+          </button>
+        </div>
+      </div>
+
+      {/* =========================================================================
+          ISA-95 DUAL-SPEED & IEC 62541 / ISA-62443 CYBERSECURITY STATUS STRIP
+      ========================================================================= */}
+      <div className="bg-slate-900 text-slate-200 border border-slate-800 rounded-xs p-3 font-mono text-xs shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          {/* Left: ISA-95 Dual-Speed Ingestion Pipeline */}
+          <div className="flex flex-wrap items-center gap-4">
+            <div className="flex items-center gap-1.5 text-sky-400 font-bold uppercase tracking-wider">
+              <Activity className="w-4 h-4 text-sky-400 animate-pulse" />
+              <span>ISA-95 DUAL-SPEED INGESTION:</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-slate-400">EDGE BUFFER:</span>
+              <span className="text-white font-semibold">{ingestionMetrics?.edge_poll_ms ?? 100}ms (Ring 500)</span>
+            </div>
+            <span className="text-slate-700">|</span>
+            <div className="flex items-center gap-1.5">
+              <span className="text-slate-400">UI RBE STREAM:</span>
+              <span className="text-white font-semibold">{ingestionMetrics?.ui_broadcast_ms ?? 400}ms</span>
+            </div>
+            <span className="text-slate-700">|</span>
+            <div className="flex items-center gap-1.5">
+              <span className="text-slate-400">DEADBAND:</span>
+              <span className="text-emerald-400 font-semibold">&plusmn;{ingestionMetrics?.rbe_deadband ?? 0.05}</span>
+            </div>
+            <span className="text-slate-700">|</span>
+            <div className="flex items-center gap-1.5">
+              <span className="text-slate-400">BANDWIDTH SAVED:</span>
+              <span className="text-emerald-300 font-bold">
+                {ingestionMetrics?.bandwidth_saved_percent ?? 0}%
+              </span>
+              <span className="text-[10px] text-slate-500">
+                ({ingestionMetrics?.skipped_edge_broadcasts ?? 0}/{ingestionMetrics?.total_edge_ticks ?? 0} ticks)
+              </span>
+            </div>
+          </div>
+
+          {/* Right: IEC 62541 & ISA/IEC 62443 Security Posture */}
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex items-center gap-1.5 text-indigo-400 font-bold uppercase tracking-wider">
+              <ShieldCheck className="w-4 h-4 text-indigo-400" />
+              <span>IEC 62541 / 62443:</span>
+            </div>
+            <span className="px-2 py-0.5 bg-indigo-950 border border-indigo-700/50 text-indigo-200 text-[11px] rounded-xs font-semibold">
+              {cyberPosture?.iec62541_opc_ua?.active_security_policy ?? 'None (Lab)'}
+            </span>
+            <span className="text-slate-400">CONDUIT: <strong className="text-white">Port {cyberPosture?.iec62541_opc_ua?.conduit_port ?? 49320}</strong></span>
+            <span className="text-slate-400">IDMZ QUEUE: <strong className={cyberPosture?.zone_3_5_idmz?.pending_records ? "text-amber-400" : "text-emerald-400"}>
+              {cyberPosture?.zone_3_5_idmz?.pending_records ?? 0} PKTS
+            </strong></span>
+            <button
+              type="button"
+              onClick={loadPipelineAndSecurityMetrics}
+              title="Làm mới thông số Dual-Speed và An ninh mạng"
+              className="p-1 hover:text-white text-slate-400 hover:bg-slate-800 rounded-xs hallmark-focus"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+            </button>
+          </div>
         </div>
       </div>
 
@@ -1020,12 +1400,24 @@ export const Isa88Model: React.FC = () => {
                               return (
                                 <div
                                   key={em.em_id}
+                                  onDragOver={(e) => {
+                                    e.preventDefault();
+                                    e.dataTransfer.dropEffect = 'copy';
+                                    setDragOverTarget(`em:${em.em_id}`);
+                                  }}
+                                  onDragLeave={() => {
+                                    if (dragOverTarget === `em:${em.em_id}`) setDragOverTarget(null);
+                                  }}
+                                  onDrop={(e) => handleDropOnModule(e, unit.unit_id, em.em_id)}
                                   className={`group flex items-center justify-between p-1 pl-2 rounded-xs cursor-pointer select-none transition-colors border ${
-                                    isEmSelected
+                                    dragOverTarget === `em:${em.em_id}`
+                                      ? 'ring-2 ring-emerald-500 bg-emerald-50/70 border-emerald-500 text-emerald-950 font-bold'
+                                      : isEmSelected
                                       ? 'bg-sky-700 text-white border-sky-700 font-bold'
                                       : 'hover:bg-slate-100 border-transparent text-slate-700'
                                   }`}
                                   onClick={() => handleSelectModule(unit, em)}
+                                  title={`${em.em_name} (Kéo thả Tag từ Kho Kepware vào đây để thêm mới)`}
                                 >
                                   <div className="flex items-center gap-1.5 truncate">
                                     <Cpu className={`w-3.5 h-3.5 flex-shrink-0 ${isEmSelected ? 'text-white' : 'text-sky-600'}`} />
@@ -1167,14 +1559,37 @@ export const Isa88Model: React.FC = () => {
                 {/* Kepware Node ID */}
                 <div className="md:col-span-2">
                   <label className="block text-[11px] font-bold text-slate-700 uppercase mb-1">
-                    Kepware Node ID *
+                    Kepware Node ID * (Có thể kéo-thả từ Kho Tag Ghim)
                   </label>
                   <input
                     type="text"
                     value={customNodeId}
                     onChange={(e) => setCustomNodeId(e.target.value)}
-                    placeholder="ns=2;s=MilkPlant.MIX01.Agit_Speed"
-                    className="w-full h-8 px-2 border border-slate-300 rounded-xs bg-white hallmark-focus"
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      e.dataTransfer.dropEffect = 'copy';
+                      setDragOverTarget('custom-tag-input');
+                    }}
+                    onDragLeave={() => {
+                      if (dragOverTarget === 'custom-tag-input') setDragOverTarget(null);
+                    }}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      setDragOverTarget(null);
+                      const dropped = extractDroppedOpcTag(e);
+                      if (dropped?.node_id) {
+                        setCustomNodeId(dropped.node_id);
+                        if (!customTagName && dropped.name && selectedContext) {
+                          setCustomTagName(`${selectedContext.unitId.replace('-', '')}_${dropped.name.toUpperCase()}`);
+                        }
+                      }
+                    }}
+                    placeholder="ns=2;s=MilkPlant.MIX01.Agit_Speed (Hoặc thả Tag vào đây)"
+                    className={`w-full h-8 px-2 border rounded-xs bg-white hallmark-focus ${
+                      dragOverTarget === 'custom-tag-input'
+                        ? 'ring-2 ring-emerald-500 bg-emerald-50/40 border-emerald-500'
+                        : 'border-slate-300'
+                    }`}
                     required
                   />
                 </div>
@@ -1311,12 +1726,47 @@ export const Isa88Model: React.FC = () => {
                 ) : (
                   activeContextTags.map((tag) => {
                     const isEditing = editingTagName === tag.tag_name;
-                    const probed = probeResults[tag.node_id];
-                    const currentQuality = probed ? probed.quality : tag.quality;
-                    const currentValue = probed && probed.value !== null ? probed.value : tag.live_value;
+                    const cleanNode = tag.node_id ? tag.node_id.replace(/^ns=\d+;s=/, '').trim() : '';
+                    const nodeKey = tag.node_id?.trim() || undefined;
+                    const cleanKey = cleanNode || undefined;
+                    const tagKey = tag.tag_name?.trim() || undefined;
+
+                    // Real-time telemetry resolution: wsTelemetryMap -> contextTelemetryMap -> probeResults -> tag.live_value
+                    const liveEntry =
+                      (nodeKey ? wsTelemetryMap[nodeKey] : undefined) ||
+                      (cleanKey ? wsTelemetryMap[cleanKey] : undefined) ||
+                      (tagKey ? wsTelemetryMap[tagKey] : undefined) ||
+                      (nodeKey && contextTelemetryMap ? contextTelemetryMap[nodeKey] : undefined) ||
+                      (cleanKey && contextTelemetryMap ? contextTelemetryMap[cleanKey] : undefined) ||
+                      (tagKey && contextTelemetryMap ? contextTelemetryMap[tagKey] : undefined);
+
+                    const probed = tag.node_id ? probeResults[tag.node_id] : undefined;
+                    const currentQuality = liveEntry?.quality || (probed ? probed.quality : tag.quality);
+                    const currentValue =
+                      liveEntry !== undefined && liveEntry.value !== null && liveEntry.value !== undefined
+                        ? liveEntry.value
+                        : (probed && probed.value !== null ? probed.value : tag.live_value);
+                    const isStreamingLive = Boolean(liveEntry && currentQuality === 'Good');
 
                     return (
-                      <tr key={tag.tag_name} className="hover:bg-slate-50 transition-colors">
+                      <tr
+                        key={tag.tag_name}
+                        onDragOver={(e) => {
+                          e.preventDefault();
+                          e.dataTransfer.dropEffect = 'copy';
+                          setDragOverTarget(`row:${tag.tag_name}`);
+                        }}
+                        onDragLeave={() => {
+                          if (dragOverTarget === `row:${tag.tag_name}`) setDragOverTarget(null);
+                        }}
+                        onDrop={(e) => handleDropOnTagRow(e, tag.tag_name)}
+                        className={`transition-colors ${
+                          dragOverTarget === `row:${tag.tag_name}`
+                            ? 'ring-2 ring-emerald-500 bg-emerald-50/60'
+                            : 'hover:bg-slate-50'
+                        }`}
+                        title="Kéo thả Tag từ Kho Tag Ghim vào dòng này để gán Node ID tức thì"
+                      >
                         {/* Tag Name */}
                         <td className="py-2 px-3 font-bold text-slate-900 whitespace-nowrap">
                           <div className="flex items-center gap-1.5">
@@ -1421,12 +1871,20 @@ export const Isa88Model: React.FC = () => {
 
                         {/* Live Value */}
                         <td className="py-2 px-3 text-right whitespace-nowrap font-bold text-slate-900">
-                          <span>
-                            {typeof currentValue === 'number'
-                              ? currentValue.toFixed(1)
-                              : currentValue?.toString() || '--'}
+                          <span className="inline-flex items-center gap-1.5 justify-end">
+                            {isStreamingLive && (
+                              <span
+                                className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse flex-shrink-0"
+                                title="Tín hiệu truyền sống từ Kepware (<100ms)"
+                              />
+                            )}
+                            <span className="font-mono">
+                              {typeof currentValue === 'number'
+                                ? (Number.isInteger(currentValue) ? currentValue.toString() : currentValue.toFixed(1))
+                                : (typeof currentValue === 'boolean' ? (currentValue ? 'TRUE' : 'FALSE') : (currentValue?.toString() || '--'))}
+                            </span>
                           </span>
-                          {tag.unit && <span className="text-slate-500 font-normal ml-1 text-[11px]">{tag.unit}</span>}
+                          {tag.unit && <span className="text-slate-500 font-normal ml-1 text-[11px] font-sans">{tag.unit}</span>}
                         </td>
 
                         {/* Quality Pill */}
@@ -1489,6 +1947,35 @@ export const Isa88Model: React.FC = () => {
                 )}
               </tbody>
             </table>
+
+            {/* Drag-and-Drop Zone to Add New Tag directly into active Module */}
+            {selectedContext && (
+              <div
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = 'copy';
+                  setDragOverTarget('inspector-add-zone');
+                }}
+                onDragLeave={() => {
+                  if (dragOverTarget === 'inspector-add-zone') setDragOverTarget(null);
+                }}
+                onDrop={(e) =>
+                  handleDropOnModule(
+                    e,
+                    selectedContext.unitId,
+                    selectedContext.emId || `EM_${selectedContext.unitId}_MAIN`
+                  )
+                }
+                className={`m-3 p-3 border border-dashed rounded-xs text-center font-mono text-xs transition-all select-none ${
+                  dragOverTarget === 'inspector-add-zone'
+                    ? 'ring-2 ring-emerald-500 bg-emerald-50/70 border-emerald-500 text-emerald-900 font-bold'
+                    : 'bg-slate-50/70 border-slate-300 text-slate-600'
+                }`}
+                title="Kéo một Tag từ khay Kho Tag Ghim thả vào đây để tự động tạo Tag mới cho Module này"
+              >
+                + Thả Tag từ Kho Kepware vào đây để thêm mới vào [{selectedContext.emId || selectedContext.unitId}]
+              </div>
+            )}
           </div>
         </section>
       </div>
@@ -1592,6 +2079,230 @@ export const Isa88Model: React.FC = () => {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================================
+          MODAL: STANDARDIZED ISA-88 ASSET TEMPLATE & AUTO-TAG GENERATOR
+      ========================================================================= */}
+      {isAssetTemplateModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4">
+          <div className="bg-white border border-slate-300 shadow-2xl max-w-2xl w-full flex flex-col rounded-xs">
+            <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between bg-slate-50">
+              <div className="flex items-center gap-2">
+                <Box className="w-5 h-5 text-emerald-700" />
+                <h2 className="text-sm font-bold text-slate-900 font-mono uppercase" style={{ fontStyle: 'normal' }}>
+                  ISA-88 ASSET TEMPLATE & AUTO-TAG GENERATOR
+                </h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsAssetTemplateModalOpen(false)}
+                className="text-slate-400 hover:text-slate-700 hallmark-focus"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleInstantiateAsset} className="p-5 space-y-4 font-mono text-xs">
+              <div className="bg-emerald-50/70 border border-emerald-200 p-3 rounded-xs text-[11px] text-emerald-900">
+                Tự động sinh toàn bộ phân cấp ISA-88 (Unit / EM / CM), tự động tạo bảng dữ liệu dbo.Tag và dbo.Tag_OPC theo chuẩn định danh:
+                <code className="ml-1 px-1.5 py-0.5 bg-white border border-emerald-300 font-bold rounded-xs">
+                  ns=2;s=Factory.{assetLineCode || 'Line01'}.{assetInstanceCode || 'TK04'}.[TagSuffix]
+                </code>
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 uppercase mb-1">
+                  1. CHỌN KHUÔN MẪU THIẾT BỊ (ISA-88 TEMPLATE CATALOG) *
+                </label>
+                <select
+                  value={selectedAssetTemplateCode}
+                  onChange={(e) => {
+                    const code = e.target.value;
+                    setSelectedAssetTemplateCode(code);
+                    if (code === 'TANK_STORAGE') {
+                      setAssetInstanceCode('TK04');
+                      setAssetInstanceName('Storage Silo Tank 04');
+                    } else if (code === 'UNIT_MIXER') {
+                      setAssetInstanceCode('MIX02');
+                      setAssetInstanceName('Mixing Vessel 02');
+                    } else if (code === 'UNIT_UHT_HEATER') {
+                      setAssetInstanceCode('HEATER02');
+                      setAssetInstanceName('UHT Pasteurizer Unit 02');
+                    } else if (code === 'UNIT_COOLER') {
+                      setAssetInstanceCode('COOLER02');
+                      setAssetInstanceName('Rapid Plate Chiller 02');
+                    } else if (code === 'EM_DOSING_PUMP') {
+                      setAssetInstanceCode('PUMP05');
+                      setAssetInstanceName('Ingredient Dosing Pump 05');
+                    } else if (code === 'CM_VALVE_ONOFF') {
+                      setAssetInstanceCode('V101');
+                      setAssetInstanceName('Pneumatic Feed Valve 101');
+                    } else if (code === 'CM_MOTOR_AGITATOR') {
+                      setAssetInstanceCode('M201');
+                      setAssetInstanceName('Tank Agitator Motor 201');
+                    }
+                  }}
+                  className="w-full h-9 px-2.5 border border-slate-300 rounded-xs bg-white text-slate-900 font-semibold hallmark-focus"
+                >
+                  {STANDARD_TEMPLATES_CATALOG.map((t) => (
+                    <option key={t.code} value={t.code}>
+                      [{t.type}] {t.name} ({t.tags} Tags chuẩn)
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-700 uppercase mb-1">
+                    2. MÃ THIẾT BỊ (INSTANCE CODE) *
+                  </label>
+                  <input
+                    type="text"
+                    value={assetInstanceCode}
+                    onChange={(e) => setAssetInstanceCode(e.target.value.toUpperCase().replace(/[^A-Z0-9_-]/g, ''))}
+                    placeholder="VD: TK04, MIX02"
+                    className="w-full h-9 px-2.5 border border-slate-300 rounded-xs uppercase bg-white text-slate-900 hallmark-focus"
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-bold text-slate-700 uppercase mb-1">
+                    3. TÊN HIỂN THỊ THIẾT BỊ
+                  </label>
+                  <input
+                    type="text"
+                    value={assetInstanceName}
+                    onChange={(e) => setAssetInstanceName(e.target.value)}
+                    placeholder="VD: Storage Silo Tank 04"
+                    className="w-full h-9 px-2.5 border border-slate-300 rounded-xs bg-white text-slate-900 hallmark-focus"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-700 uppercase mb-1">
+                    4. DÂY CHUYỀN SẢN XUẤT (LINE CODE)
+                  </label>
+                  <input
+                    type="text"
+                    value={assetLineCode}
+                    onChange={(e) => setAssetLineCode(e.target.value)}
+                    placeholder="Line01"
+                    className="w-full h-9 px-2.5 border border-slate-300 rounded-xs bg-white text-slate-900 hallmark-focus"
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-bold text-slate-700 uppercase mb-1">
+                    5. Ô ĐIỀU KHIỂN (AUTOMATION CELL)
+                  </label>
+                  <select
+                    value={assetCellId}
+                    onChange={(e) => setAssetCellId(e.target.value)}
+                    className="w-full h-9 px-2.5 border border-slate-300 rounded-xs bg-white text-slate-900 hallmark-focus"
+                  >
+                    <option value="Cell1_Real">Cell1_Real (Siemens S7-1500 PLC Phần Cứng)</option>
+                    <option value="Cell2_SIMIT">Cell2_SIMIT (Siemens SIMIT Digital Twin)</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => setIsAssetTemplateModalOpen(false)}
+                  className="h-9 px-4 text-slate-600 hover:bg-slate-100 border border-slate-300 rounded-xs hallmark-focus"
+                >
+                  HỦY
+                </button>
+                <button
+                  type="submit"
+                  disabled={isInstantiatingAsset || !assetInstanceCode.trim()}
+                  className="h-9 px-4 bg-emerald-700 hover:bg-emerald-800 text-white font-bold rounded-xs hallmark-focus disabled:opacity-50"
+                >
+                  {isInstantiatingAsset ? 'ĐANG KHỞI TẠO...' : 'KHỞI TẠO & ĐỒNG BỘ SQL'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================================
+          MODAL: SIEMENS TIA PORTAL SCL EXPORT (DB_OPC_Gateway.scl)
+      ========================================================================= */}
+      {sclModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4">
+          <div className="bg-white border border-slate-300 shadow-2xl max-w-4xl w-full flex flex-col rounded-xs max-h-[90vh]">
+            <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between bg-slate-50">
+              <div className="flex items-center gap-2">
+                <FileCode className="w-5 h-5 text-indigo-700" />
+                <div>
+                  <h2 className="text-sm font-bold text-slate-900 font-mono uppercase" style={{ fontStyle: 'normal' }}>
+                    SIEMENS TIA PORTAL SCL SOURCE EXPORT (DB_OPC_Gateway.scl)
+                  </h2>
+                  <p className="text-[11px] text-slate-500 font-mono mt-0.5">
+                    Standard: IEC 61131-3 SCL &middot; S7-1500/1200 non-optimized Global DB &middot; Mapped to SQL Server
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSclModalOpen(false)}
+                className="text-slate-400 hover:text-slate-700 hallmark-focus"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-4 flex-1 overflow-auto bg-slate-950 text-slate-200 font-mono text-xs">
+              <pre className="whitespace-pre overflow-x-auto leading-relaxed selection:bg-indigo-700 selection:text-white">
+                {sclCode}
+              </pre>
+            </div>
+
+            <div className="px-5 py-3 border-t border-slate-200 bg-slate-50 flex items-center justify-between font-mono text-xs">
+              <div className="flex items-center gap-3 text-slate-500 text-[11px]">
+                <span>{sclCode.split('\n').length} DÒNG SCL</span>
+                <span>&middot;</span>
+                <span>{sclCode.length} BYTES</span>
+                <span>&middot;</span>
+                <span className="text-emerald-700 font-semibold">{`{ S7_Optimized_Access := 'FALSE' }`}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleCopy(sclCode, 'scl_source')}
+                  className="h-9 px-3.5 bg-white border border-slate-300 hover:bg-slate-100 text-slate-800 font-semibold uppercase tracking-wider flex items-center gap-1.5 rounded-xs transition-all hallmark-focus"
+                >
+                  {copiedKey === 'scl_source' ? (
+                    <>
+                      <Check className="w-3.5 h-3.5 text-emerald-600" />
+                      <span className="text-emerald-700">ĐÃ CHÉP</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3.5 h-3.5 text-slate-600" />
+                      <span>SAO CHÉP MÃ</span>
+                    </>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDownloadTiaPortalScl}
+                  className="h-9 px-4 bg-indigo-700 hover:bg-indigo-800 text-white font-bold uppercase tracking-wider flex items-center gap-1.5 rounded-xs transition-all hallmark-focus shadow-xs"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>TẢI TỆP .SCL (DB_OPC_Gateway.scl)</span>
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

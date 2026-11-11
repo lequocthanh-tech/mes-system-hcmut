@@ -123,15 +123,30 @@ export const OpcGatewayConfigCard: React.FC = () => {
     return () => clearInterval(interval);
   }, []);
 
+  const normalizeEndpoint = (raw: string): string => {
+    let ep = (raw || '').trim();
+    if (!ep) return 'opc.tcp://127.0.0.1:49320';
+    if (!ep.startsWith('opc.tcp://')) {
+      ep = `opc.tcp://${ep}`;
+    }
+    const body = ep.replace('opc.tcp://', '');
+    if (!body.includes(':')) {
+      ep = `${ep}:49320`;
+    }
+    return ep;
+  };
+
   const handleTestHandshake = async () => {
     setFeedback(null);
     setIsHandshaking(true);
+    const targetUrl = normalizeEndpoint(endpointUrl);
+    setEndpointUrl(targetUrl);
     try {
-      const res = await testGatewayHandshake(endpointUrl, timeoutMs);
+      const res = await testGatewayHandshake(targetUrl, timeoutMs);
       if (res.success) {
         setFeedback({
           type: 'success',
-          message: res.message || `OPC UA Handshake Verified: Successfully reached ${endpointUrl}`
+          message: res.message || `OPC UA Handshake Verified: Successfully reached ${targetUrl}`
         });
       } else {
         setFeedback({
@@ -165,8 +180,10 @@ export const OpcGatewayConfigCard: React.FC = () => {
       }
     } else {
       setIsConnecting(true);
+      const targetUrl = normalizeEndpoint(endpointUrl);
+      setEndpointUrl(targetUrl);
       try {
-        const res = await connectGateway(endpointUrl);
+        const res = await connectGateway(targetUrl);
         const connSuccess = Boolean(
           res?.success && 
           (res?.status === 'ONLINE' || res?.connected || res?.is_connected || res?.status === 'connected')
@@ -177,13 +194,13 @@ export const OpcGatewayConfigCard: React.FC = () => {
           freshStatus?.is_connected || freshStatus?.connected || freshStatus?.status === 'ONLINE'
         );
         if (connSuccess || freshOnline) {
-          setFeedback({ type: 'success', message: `Connected to OPC UA Gateway: ${endpointUrl}` });
+          setFeedback({ type: 'success', message: `Đã kết nối thành công tới OPC UA Gateway: ${targetUrl}` });
         } else {
-          setFeedback({ type: 'error', message: `Connection failed: ${res?.error || 'Target server unreachable.'}` });
+          setFeedback({ type: 'error', message: `Kết nối thất bại: ${res?.error || 'Target server unreachable.'}` });
         }
       } catch (err: any) {
         await refreshGatewayStatus();
-        setFeedback({ type: 'error', message: `Connection failed: ${err?.message || 'Network error'}` });
+        setFeedback({ type: 'error', message: `Kết nối thất bại: ${err?.message || 'Network error'}` });
       } finally {
         setIsConnecting(false);
         setIsLoading(false);
@@ -195,9 +212,11 @@ export const OpcGatewayConfigCard: React.FC = () => {
     e.preventDefault();
     setFeedback(null);
     setIsSaving(true);
+    const targetUrl = normalizeEndpoint(endpointUrl);
+    setEndpointUrl(targetUrl);
     try {
       const res = await updateGatewayConfig({
-        endpoint: endpointUrl,
+        endpoint: targetUrl,
         timeout_ms: timeoutMs,
         sampling_rate_ms: samplingIntervalMs,
         sampling_interval_ms: samplingIntervalMs,
@@ -211,18 +230,18 @@ export const OpcGatewayConfigCard: React.FC = () => {
       if (res.success) {
         setFeedback({
           type: 'success',
-          message: res.message || 'OPC UA Gateway configuration persisted to disk and applied.'
+          message: res.message || `Đã lưu cấu hình Kepware (${targetUrl}) vào file backend và kích hoạt kết nối.`
         });
       } else {
         setFeedback({
           type: 'error',
-          message: `Failed to save configuration: ${res.error || 'Server error'}`
+          message: `Lỗi khi lưu cấu hình: ${res.error || 'Server error'}`
         });
       }
     } catch (err: any) {
       setFeedback({
         type: 'error',
-        message: `Failed to save configuration: ${err?.message || 'Network error'}`
+        message: `Lỗi khi lưu cấu hình: ${err?.message || 'Network error'}`
       });
     } finally {
       setIsSaving(false);
@@ -235,7 +254,23 @@ export const OpcGatewayConfigCard: React.FC = () => {
       subtitle="ISA-95 Level 3 MOM Centralized Connectivity Hub · Pure Infrastructure"
       tag="KEPSERVEREX"
       headerAction={
-        <div className="flex items-center gap-2 font-mono text-xs">
+        <div className="flex flex-wrap items-center gap-2 font-mono text-xs">
+          <button
+            type="button"
+            onClick={() => window.dispatchEvent(new CustomEvent('mes-open-kepware-scanner'))}
+            className="h-7 px-2.5 bg-sky-600 hover:bg-sky-500 text-white border border-sky-700 font-bold flex items-center gap-1.5 rounded-sm transition-colors"
+            title="Quét Cây Dữ Liệu Kepware (Browse & Import)"
+          >
+            <span>🔍 Quét Cây Dữ Liệu Kepware (Browse & Import)</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => window.dispatchEvent(new CustomEvent('mes-toggle-pinned-palette'))}
+            className="h-7 px-2.5 bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700 font-bold flex items-center gap-1.5 rounded-sm transition-colors"
+            title="Ghim Kho Tag Kéo-Thả lên màn hình"
+          >
+            <span>📌 Kho Tag Ghim</span>
+          </button>
           {isConnecting ? (
             <span className="h-7 px-2.5 bg-sky-50 text-sky-800 border border-sky-300 font-bold flex items-center gap-1.5">
               <RefreshCw className="w-3 h-3 animate-spin text-sky-600" />
@@ -303,18 +338,36 @@ export const OpcGatewayConfigCard: React.FC = () => {
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {/* Endpoint URL - Dynamic & Editable */}
           <div className="md:col-span-2">
-            <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1.5 flex items-center gap-1.5">
-              <Link2 className="w-3.5 h-3.5 text-slate-500" />
-              <span>Endpoint URL</span>
+            <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1.5 flex items-center justify-between">
+              <span className="flex items-center gap-1.5">
+                <Link2 className="w-3.5 h-3.5 text-slate-500" />
+                <span>Endpoint URL (Địa chỉ IP / Host máy Kepware)</span>
+              </span>
+              <span className="text-[10px] text-slate-500 font-normal">
+                Lưu vào gateway_config.json backend & kết nối động
+              </span>
             </label>
-            <input
-              type="text"
-              value={endpointUrl}
-              onChange={(e) => setEndpointUrl(e.target.value)}
-              placeholder="opc.tcp://<IP_OR_HOSTNAME>:<PORT>"
-              className="w-full h-9 font-mono text-xs border border-slate-300 bg-white px-3 focus:outline-2 focus:outline-sky-600 focus:outline-offset-2"
-              required
-            />
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={endpointUrl}
+                onChange={(e) => setEndpointUrl(e.target.value)}
+                placeholder="VD: 192.168.0.100 hoặc opc.tcp://192.168.0.100:49320"
+                className="w-full h-9 font-mono text-xs border border-slate-300 bg-white px-3 focus:outline-2 focus:outline-sky-600 focus:outline-offset-2"
+                required
+              />
+              <button
+                type="button"
+                onClick={() => setEndpointUrl('opc.tcp://127.0.0.1:49320')}
+                className="h-9 px-3 bg-slate-100 hover:bg-slate-200 text-slate-700 font-mono text-[11px] font-semibold border border-slate-300 rounded-xs whitespace-nowrap active:translate-y-px"
+                title="Khôi phục địa chỉ local mặc định"
+              >
+                Localhost
+              </button>
+            </div>
+            <p className="mt-1 text-[11px] text-slate-500 font-mono">
+              Nhập IP máy Kepware ngoại vi (VD: <span className="font-bold text-slate-800">192.168.0.100</span>). Hệ thống tự chuẩn hóa thành <span className="font-bold text-slate-800">opc.tcp://192.168.0.100:49320</span> và lưu cấu hình cố định trên backend.
+            </p>
           </div>
 
           {/* Provider Name */}

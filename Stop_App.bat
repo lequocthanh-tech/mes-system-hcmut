@@ -1,7 +1,11 @@
 @echo off
-echo Stopping all MES and Gateway background processes...
-taskkill /F /IM python.exe /T >nul 2>&1
-for /f "tokens=5" %%a in ('netstat -aon ^| findstr :8000') do taskkill /f /pid %%a >nul 2>&1
-for /f "tokens=5" %%a in ('netstat -aon ^| findstr :5173') do taskkill /f /pid %%a >nul 2>&1
-echo [OK] All MES services and background tasks terminated cleanly.
+echo =========================================================================
+echo Stopping all DAIRY MES WORKBENCH and Gateway background processes...
+echo =========================================================================
+for %%P in (8000 5173) do (
+    for /f "tokens=5" %%a in ('netstat -aon ^| findstr :%%P') do (
+        if %%a NEQ 0 ( taskkill /F /T /PID %%a >nul 2>&1 )
+    )
+)
+echo [OK] All MES services on ports 8000 and 5173 terminated cleanly.
 pause

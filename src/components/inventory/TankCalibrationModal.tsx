@@ -16,6 +16,7 @@ import {
   Save, 
   ShieldCheck 
 } from 'lucide-react';
+import { extractDroppedOpcTag } from '../PinnedTagPalette';
 
 export function sanitizeMaterialName(name?: string, _tankId?: string): string {
   if (!name) return '';
@@ -50,6 +51,10 @@ export const TankCalibrationModal: React.FC<TankCalibrationModalProps> = ({
   const [minSafety, setMinSafety] = useState<number>(0.5);
   const [currentStock, setCurrentStock] = useState<number>(0.0);
   const [unit, setUnit] = useState('L');
+  const [opcNodeId, setOpcNodeId] = useState('');
+  const [opcHighNodeId, setOpcHighNodeId] = useState('');
+  const [opcLowNodeId, setOpcLowNodeId] = useState('');
+  const [dragOverField, setDragOverField] = useState<'pv' | 'lsh' | 'lsl' | null>(null);
 
   // Submission States
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -71,6 +76,9 @@ export const TankCalibrationModal: React.FC<TankCalibrationModalProps> = ({
         (tank as any).Total_Quantity,
       ].find((v) => v !== undefined && v !== null && v !== '' && !isNaN(Number(v)));
       setCurrentStock(rawStock !== undefined ? Number(rawStock) : 0);
+      setOpcNodeId(tank.opc_node_id || (tank as any).opcNodeId || (tank as any).opc_tag || '');
+      setOpcHighNodeId((tank as any).opc_high_node_id || (tank as any).opcHighNodeId || '');
+      setOpcLowNodeId((tank as any).opc_low_node_id || (tank as any).opcLowNodeId || '');
 
       setFeedback(null);
     }
@@ -121,6 +129,9 @@ export const TankCalibrationModal: React.FC<TankCalibrationModalProps> = ({
       unit: unit.trim() || 'L',
       current_stock: numStock,
       currentStock: numStock,
+      opc_node_id: opcNodeId.trim(),
+      opc_high_node_id: opcHighNodeId.trim(),
+      opc_low_node_id: opcLowNodeId.trim(),
       user: user?.username || 'admin',
       role: user?.role || 'ADMIN',
     };
@@ -293,6 +304,110 @@ export const TankCalibrationModal: React.FC<TankCalibrationModalProps> = ({
                 className="w-full bg-white border border-slate-300 h-9 px-3 text-xs text-right rounded-xs hallmark-focus font-mono font-bold text-emerald-800 bg-emerald-50/20"
               />
               <p className="text-[10px] text-slate-400 font-mono">Số dư kiểm kê thực tế</p>
+            </div>
+          </div>
+
+          {/* Kepware OPC UA Drag-and-Drop Sensor Node Mapping */}
+          <div className="p-3 bg-slate-50 border border-slate-200 rounded-xs space-y-2.5">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-bold text-slate-800 uppercase">
+                Ánh xạ Cảm biến Kepware OPC UA (Hỗ trợ Kéo-Thả từ Kho Tag Ghim)
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
+              <div>
+                <label className="block text-[10px] font-bold text-slate-600 uppercase mb-1">
+                  PV (Loadcell / Level)
+                </label>
+                <input
+                  type="text"
+                  value={opcNodeId}
+                  onChange={(e) => setOpcNodeId(e.target.value)}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = 'copy';
+                    setDragOverField('pv');
+                  }}
+                  onDragLeave={() => {
+                    if (dragOverField === 'pv') setDragOverField(null);
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setDragOverField(null);
+                    const dropped = extractDroppedOpcTag(e);
+                    if (dropped?.node_id) setOpcNodeId(dropped.node_id);
+                  }}
+                  placeholder="Thả Tag PV vào đây..."
+                  className={`w-full h-8 px-2 text-[11px] font-mono bg-white border rounded-xs hallmark-focus ${
+                    dragOverField === 'pv'
+                      ? 'ring-2 ring-emerald-500 bg-emerald-50/40 border-emerald-500'
+                      : 'border-slate-300'
+                  }`}
+                />
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold text-slate-600 uppercase mb-1">
+                  High Level (LSH)
+                </label>
+                <input
+                  type="text"
+                  value={opcHighNodeId}
+                  onChange={(e) => setOpcHighNodeId(e.target.value)}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = 'copy';
+                    setDragOverField('lsh');
+                  }}
+                  onDragLeave={() => {
+                    if (dragOverField === 'lsh') setDragOverField(null);
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setDragOverField(null);
+                    const dropped = extractDroppedOpcTag(e);
+                    if (dropped?.node_id) setOpcHighNodeId(dropped.node_id);
+                  }}
+                  placeholder="Thả Tag LSH vào đây..."
+                  className={`w-full h-8 px-2 text-[11px] font-mono bg-white border rounded-xs hallmark-focus ${
+                    dragOverField === 'lsh'
+                      ? 'ring-2 ring-emerald-500 bg-emerald-50/40 border-emerald-500'
+                      : 'border-slate-300'
+                  }`}
+                />
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold text-slate-600 uppercase mb-1">
+                  Low Level (LSL)
+                </label>
+                <input
+                  type="text"
+                  value={opcLowNodeId}
+                  onChange={(e) => setOpcLowNodeId(e.target.value)}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = 'copy';
+                    setDragOverField('lsl');
+                  }}
+                  onDragLeave={() => {
+                    if (dragOverField === 'lsl') setDragOverField(null);
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setDragOverField(null);
+                    const dropped = extractDroppedOpcTag(e);
+                    if (dropped?.node_id) setOpcLowNodeId(dropped.node_id);
+                  }}
+                  placeholder="Thả Tag LSL vào đây..."
+                  className={`w-full h-8 px-2 text-[11px] font-mono bg-white border rounded-xs hallmark-focus ${
+                    dragOverField === 'lsl'
+                      ? 'ring-2 ring-emerald-500 bg-emerald-50/40 border-emerald-500'
+                      : 'border-slate-300'
+                  }`}
+                />
+              </div>
             </div>
           </div>
 

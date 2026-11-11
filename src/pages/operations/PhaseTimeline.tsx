@@ -16,6 +16,8 @@ import {
   Settings,
   Lock
 } from 'lucide-react';
+import * as api from '../../services/api';
+import { extractDroppedOpcTag } from '../../components/PinnedTagPalette';
 import { 
   getIsa88State, 
   ISA88_STATES, 
@@ -42,6 +44,37 @@ export const PhaseTimeline: React.FC = () => {
   // Modal States
   const [isTagModalOpen, setIsTagModalOpen] = useState(false);
   const [isDurationModalOpen, setIsDurationModalOpen] = useState(false);
+  const [dragOverPhaseId, setDragOverPhaseId] = useState<string | null>(null);
+  const [dropBanner, setDropBanner] = useState<string | null>(null);
+
+  const handleDropOnPhaseRow = async (e: React.DragEvent, node: TimelineNode, isSimit: boolean) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOverPhaseId(null);
+    const dropped = extractDroppedOpcTag(e);
+    if (!dropped || !dropped.node_id) return;
+
+    const prefix = isSimit ? 'pc2_simit_phases' : 'pc1_phases';
+    const fullKey = `${prefix}.${node.code}`;
+    try {
+      await api.updateModuleTagMappings(
+        'operations',
+        {
+          [fullKey]: { node_id: dropped.node_id, role: 'STATE', unit: 'Int16' },
+          [`${prefix}.${node.code}.run_cmd`]: { node_id: dropped.node_id, role: 'STATE', unit: 'Int16' },
+        },
+        'admin',
+        'ADMIN'
+      );
+      setDropBanner(
+        `✔ Đã ánh xạ kéo-thả Pha [${node.code} - ${node.name}] (${isSimit ? 'SIMIT Twin' : 'Cell 1 HW'}) ← ${dropped.node_id} và lưu vĩnh viễn vào tag_mappings.json!`
+      );
+      setTimeout(() => setDropBanner(null), 5000);
+    } catch (err: any) {
+      setDropBanner(`Lỗi gán Tag Pha [${node.code}]: ${err.message || 'Không thể lưu'}`);
+      setTimeout(() => setDropBanner(null), 5000);
+    }
+  };
 
   // Derive runtime scrubber position from active running order
   const activeRunningOrder = runningOrders[0];
@@ -106,13 +139,30 @@ export const PhaseTimeline: React.FC = () => {
 
           const isUp = node.type === 'UP';
           const isOp = node.type === 'OP';
+          const isSimitRow = Boolean((cellLabel && cellLabel.includes('SIMIT')) || (node.targetCell && node.targetCell.includes('Cell 2')));
 
           return (
             <div
               key={node.id}
-              className={`grid grid-cols-12 items-center hover:bg-slate-50 transition-none ${
-                isUp ? 'bg-slate-50/80 font-bold' : isOp ? 'bg-white font-semibold' : 'bg-white'
+              onDragOver={(e) => {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'copy';
+                setDragOverPhaseId(node.id);
+              }}
+              onDragLeave={() => {
+                if (dragOverPhaseId === node.id) setDragOverPhaseId(null);
+              }}
+              onDrop={(e) => handleDropOnPhaseRow(e, node, isSimitRow)}
+              className={`grid grid-cols-12 items-center transition-colors ${
+                dragOverPhaseId === node.id
+                  ? 'ring-2 ring-emerald-500 bg-emerald-50/70'
+                  : isUp
+                  ? 'bg-slate-50/80 font-bold hover:bg-slate-50'
+                  : isOp
+                  ? 'bg-white font-semibold hover:bg-slate-50'
+                  : 'bg-white hover:bg-slate-50'
               }`}
+              title={`Thả Tag từ Kho Tag Ghim vào dòng này để gán OPC UA Node ID cho [${node.code} - ${node.name}]`}
             >
               {/* Left Column: Procedural Node Code & Name & State */}
               <div className="col-span-4 sm:col-span-3 p-2.5 border-r border-slate-200 flex items-center justify-between gap-1 overflow-hidden">
@@ -297,6 +347,20 @@ export const PhaseTimeline: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {/* Drag-and-Drop Feedback Banner */}
+      {dropBanner && (
+        <div className="bg-emerald-50 border border-emerald-300 text-emerald-950 px-4 py-2.5 text-xs font-mono font-bold flex items-center justify-between shadow-xs">
+          <span>{dropBanner}</span>
+          <button
+            type="button"
+            onClick={() => setDropBanner(null)}
+            className="text-emerald-700 hover:text-emerald-950 px-1.5 font-bold"
+          >
+            [✕]
+          </button>
+        </div>
+      )}
 
       {/* 11-State ISA-88 Color Legend Strip (Standardized 0 to 11) */}
       <div className="bg-white border border-slate-200 px-4 py-2 shadow-xs">

@@ -42,6 +42,7 @@ class DispatchRecipePayload(BaseModel):
     recipe_name: Optional[str] = "Fresh Pasteurized Milk"
     target_volume: Optional[float] = 1000.0
     setpoints: Optional[Dict[str, float]] = None
+    current_batch: Optional[int] = None
 
 class StartBatchPayload(BaseModel):
     order_code: Optional[str] = None
@@ -67,6 +68,8 @@ async def get_dual_run_status():
         return {
             "status": "success",
             "state": batch_engine.state.batch_state,
+            "state_source": batch_engine.state.state_source,
+            "virtual_state_fallback": batch_engine.state.virtual_state_fallback,
             "execution_mode": batch_engine.state.execution_mode,
             "order_code": batch_engine.state.order_code,
             "recipe_name": batch_engine.state.recipe_name,
@@ -85,6 +88,8 @@ async def get_dual_run_status():
         return {
             "status": "warning",
             "state": batch_engine.state.batch_state,
+            "state_source": batch_engine.state.state_source,
+            "virtual_state_fallback": batch_engine.state.virtual_state_fallback,
             "execution_mode": batch_engine.state.execution_mode,
             "order_code": batch_engine.state.order_code,
             "recipe_name": batch_engine.state.recipe_name,
@@ -138,7 +143,8 @@ async def dispatch_recipe_endpoint(payload: DispatchRecipePayload):
             execution_mode=payload.execution_mode or "mode3_dual",
             recipe_name=payload.recipe_name or "Fresh Pasteurized Milk",
             target_volume=payload.target_volume or 1000.0,
-            setpoints=payload.setpoints
+            setpoints=payload.setpoints,
+            current_batch=payload.current_batch
         )
         return res
     except Exception as exc:
@@ -155,8 +161,8 @@ async def start_batch_endpoint(payload: StartBatchPayload):
     """
     Triggers batch execution:
     - Emits 500ms CMD_Start pulse to active cell(s)
-    - Records start timestamps: t_start_cell1 and t_start_cell2
-    - Activates runtime timers
+    - Polls State_ID transition (PENDING_PLC_ACK -> RUNNING) up to 800ms
+    - Exposes state_source: 'PLC_HARDWARE' | 'VIRTUAL_SIM_FALLBACK'
     """
     try:
         res = await batch_engine.start_batch(
@@ -169,7 +175,63 @@ async def start_batch_endpoint(payload: StartBatchPayload):
         return {
             "status": "error",
             "message": str(exc),
-            "batch_state": batch_engine.state.batch_state
+            "batch_state": batch_engine.state.batch_state,
+            "state_source": batch_engine.state.state_source,
+            "virtual_state_fallback": batch_engine.state.virtual_state_fallback
+        }
+
+@router.post("/api/operations/dual-run/hold-batch")
+async def hold_batch_endpoint(payload: StartBatchPayload):
+    """Triggers ISA-88 CMD_Hold pulse and polls State_ID feedback (2=HELD)."""
+    try:
+        return await batch_engine.hold_batch(
+            order_code=payload.order_code,
+            execution_mode=payload.execution_mode
+        )
+    except Exception as exc:
+        logger.warning(f"[hold_batch_endpoint] Error: {exc}")
+        return {
+            "status": "error",
+            "message": str(exc),
+            "batch_state": batch_engine.state.batch_state,
+            "state_source": batch_engine.state.state_source,
+            "virtual_state_fallback": batch_engine.state.virtual_state_fallback
+        }
+
+@router.post("/api/operations/dual-run/resume-batch")
+async def resume_batch_endpoint(payload: StartBatchPayload):
+    """Triggers ISA-88 CMD_Resume pulse and polls State_ID feedback (1=RUNNING)."""
+    try:
+        return await batch_engine.resume_batch(
+            order_code=payload.order_code,
+            execution_mode=payload.execution_mode
+        )
+    except Exception as exc:
+        logger.warning(f"[resume_batch_endpoint] Error: {exc}")
+        return {
+            "status": "error",
+            "message": str(exc),
+            "batch_state": batch_engine.state.batch_state,
+            "state_source": batch_engine.state.state_source,
+            "virtual_state_fallback": batch_engine.state.virtual_state_fallback
+        }
+
+@router.post("/api/operations/dual-run/abort-batch")
+async def abort_batch_endpoint(payload: StartBatchPayload):
+    """Triggers ISA-88 CMD_Abort pulse and polls State_ID feedback (4=ABORTED)."""
+    try:
+        return await batch_engine.abort_batch(
+            order_code=payload.order_code,
+            execution_mode=payload.execution_mode
+        )
+    except Exception as exc:
+        logger.warning(f"[abort_batch_endpoint] Error: {exc}")
+        return {
+            "status": "error",
+            "message": str(exc),
+            "batch_state": batch_engine.state.batch_state,
+            "state_source": batch_engine.state.state_source,
+            "virtual_state_fallback": batch_engine.state.virtual_state_fallback
         }
 
 @router.get("/api/operations/dual-run/deviation-matrix")
@@ -217,17 +279,41 @@ async def complete_cell_endpoint(payload: CompleteCellPayload):
         logger.warning(f"[complete_cell_endpoint] Error: {exc}")
         raise HTTPException(status_code=500, detail=str(exc))
 
-@router.post("/api/operations/dual-run/reset")
-async def reset_dual_run_endpoint():
-    """Resets the dual-run state machine back to IDLE."""
+@router.post("/api/operations/dual-run/confirm-drain")
+@router.post("/api/batch/confirm-drain")
+async def confirm_batch_drain_endpoint():
+    """
+    Smart Factory Closed-Loop:
+    Manual override / confirmation that Output Tank has been drained.
+    Releases the sensor-driven wait loop and allows immediate auto-advancement to next sub-batch.
+    """
     try:
-        batch_engine.state.reset()
+        batch_engine.state.awaiting_drain = False
         return {
             "status": "success",
-            "message": "Dual-run benchmark state reset to IDLE."
+            "message": "Output tank drain confirmed. Auto-advancing to next sub-batch...",
+            "awaiting_drain": False
+        }
+    except Exception as exc:
+        logger.warning(f"[confirm_batch_drain_endpoint] Error: {exc}")
+        return {
+            "status": "error",
+            "message": str(exc)
+        }
+
+@router.post("/api/operations/dual-run/reset")
+async def reset_dual_run_endpoint():
+    """Triggers ISA-88 CMD_Reset pulse and resets the dual-run state machine back to IDLE."""
+    try:
+        res = await batch_engine.reset_batch()
+        return {
+            "status": "success",
+            "message": "Dual-run benchmark state reset to IDLE.",
+            **res
         }
     except Exception as exc:
         logger.warning(f"[reset_dual_run_endpoint] Error: {exc}")
+        batch_engine.state.reset()
         return {
             "status": "error",
             "message": str(exc)
@@ -272,4 +358,38 @@ async def test_opc_node_opc_route(payload: Dict[str, Any] = Body(...)):
             "quality": "Bad",
             "message": f"Central gateway error: {str(exc)}"
         }
+
+# ============================================================================
+# OPC UA ADDRESS SPACE TREE BROWSER & TAG POOL PROXIES
+# ============================================================================
+
+@router.get("/api/gateway/browse-tree")
+async def opc_browse_tree_route():
+    from kepware_gateway import browse_kepware_tree
+    return await browse_kepware_tree()
+
+@router.get("/api/gateway/browse-node")
+async def opc_browse_node_route(node_id: Optional[str] = None):
+    from kepware_gateway import browse_kepware_single_node
+    return await browse_kepware_single_node(node_id=node_id)
+
+@router.get("/api/gateway/pool")
+async def opc_get_pool_route():
+    from kepware_gateway import get_staged_tag_pool
+    return await get_staged_tag_pool()
+
+@router.post("/api/gateway/pool/add")
+async def opc_add_pool_route(payload: Any = Body(...)):
+    from kepware_gateway import add_tags_to_staged_pool
+    return await add_tags_to_staged_pool(payload=payload)
+
+@router.delete("/api/gateway/pool/remove")
+async def opc_remove_pool_route(
+    node_id: Optional[str] = None,
+    folder: Optional[str] = None,
+    payload: Optional[Dict[str, Any]] = Body(default=None)
+):
+    from kepware_gateway import remove_tags_from_staged_pool
+    return await remove_tags_from_staged_pool(node_id=node_id, folder=folder, payload=payload)
+
 

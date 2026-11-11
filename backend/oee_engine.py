@@ -14,6 +14,7 @@ Zero hardcoded mock numbers: outputs 0.0% when system is in cold standby.
 
 import sys
 import os
+import time
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Tuple

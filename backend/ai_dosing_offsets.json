@@ -1,0 +1,8 @@
+{
+  "WEIGH-01": {
+    "offset_kg": -2.15,
+    "applied_at": "2026-10-30T21:06:56.075471",
+    "operator": "Lead_MOM_Engineer",
+    "reason": "Hitl in-flight momentum compensation"
+  }
+}

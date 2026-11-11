@@ -18,7 +18,10 @@ import {
   ExecutionMode,
   DigitalTwinDeviationRow,
   DualRunBenchmarkSummary,
-  DeviationStatus
+  DeviationStatus,
+  StateSourceType,
+  SpTrackingStatus,
+  TwinSyncStatus
 } from '../types/operations';
 import { useMasterData } from './MasterDataContext';
 import { useGatewayStatus } from './ConfigContext';
@@ -42,6 +45,10 @@ interface OperationsContextType {
   cell2Complete: boolean;
   cell1Duration: string;
   cell2Duration: string;
+
+  // ISA-88 PLC State Authority vs. Virtual Commissioning Fallback
+  stateSource: StateSourceType;
+  virtualStateFallback: boolean;
 
   // Digital Twin Deviation Matrix & Benchmark Telemetry
   deviationMatrix: DigitalTwinDeviationRow[];
@@ -659,12 +666,22 @@ export const OperationsProvider: React.FC<{ children: React.ReactNode }> = ({ ch
   const [cell2Complete, setCell2Complete] = useState<boolean>(false);
   const [cell1Duration, setCell1Duration] = useState<string>('--');
   const [cell2Duration, setCell2Duration] = useState<string>('--');
+  const [stateSource, setStateSource] = useState<StateSourceType>('VIRTUAL_SIM_FALLBACK');
+  const [virtualStateFallback, setVirtualStateFallback] = useState<boolean>(false);
   const [deviationMatrix, setDeviationMatrix] = useState<DigitalTwinDeviationRow[]>([]);
   const [benchmarkSummary, setBenchmarkSummary] = useState<DualRunBenchmarkSummary | null>(null);
 
   const refreshDeviationMatrix = async () => {
     try {
       const res = await api.getDeviationMatrix();
+      if (res) {
+        if (res.state_source === 'PLC_HARDWARE' || res.state_source === 'VIRTUAL_SIM_FALLBACK') {
+          setStateSource(res.state_source);
+        }
+        if (typeof res.virtual_state_fallback === 'boolean') {
+          setVirtualStateFallback(res.virtual_state_fallback);
+        }
+      }
       if (res && res.matrix) {
         const rows: DigitalTwinDeviationRow[] = res.matrix.map((m: any) => ({
           id: m.id,
@@ -675,8 +692,14 @@ export const OperationsProvider: React.FC<{ children: React.ReactNode }> = ({ ch
           pvHardware: m.pv_hardware,
           pvSimit: m.pv_simit,
           delta: m.delta,
+          deltaSp: m.delta_sp ?? null,
+          absDeltaSp: m.abs_delta_sp ?? null,
+          deltaTwin: m.delta_twin ?? null,
           tolerance: m.tolerance,
           status: m.status as DeviationStatus,
+          spTrackingStatus: m.sp_tracking_status as SpTrackingStatus | undefined,
+          twinSyncStatus: m.twin_sync_status as TwinSyncStatus | undefined,
+          parameterFidelity: m.parameter_fidelity ?? null,
           c1Mapped: m.c1_mapped,
           c2Mapped: m.c2_mapped,
         }));
@@ -686,9 +709,13 @@ export const OperationsProvider: React.FC<{ children: React.ReactNode }> = ({ ch
           const b = res.benchmark_summary;
           setBenchmarkSummary({
             mappedParameters: b.mapped_parameters ?? 0,
+            mappedTwinParameters: b.mapped_twin_parameters ?? 0,
             matchedParameters: b.matched_parameters ?? 0,
+            synchronizedParameters: b.synchronized_parameters ?? 0,
             totalParameters: b.total_parameters ?? 6,
             fidelityIndex: b.fidelity_index,
+            stateSource: b.state_source || res.state_source,
+            virtualStateFallback: b.virtual_state_fallback ?? res.virtual_state_fallback,
             tHardwareSec: b.t_hardware_sec,
             tHardwareFormatted: b.t_hardware_formatted || '--',
             tSimitSec: b.t_simit_sec,
@@ -720,7 +747,7 @@ export const OperationsProvider: React.FC<{ children: React.ReactNode }> = ({ ch
 
   useEffect(() => {
     refreshDeviationMatrix();
-    const interval = setInterval(refreshDeviationMatrix, 2000);
+    const interval = setInterval(refreshDeviationMatrix, 3000);
     return () => clearInterval(interval);
   }, []);
 
@@ -901,67 +928,105 @@ export const OperationsProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     }
   }, [masterData?.workOrders]);
 
+  // Strict 4-tier Setpoint vs. Actual (SP vs. PV) evaluation helper
+  const evaluateSpVsPvStatus = (
+    sp: number,
+    pv: number | null,
+    unit: string,
+    batchState: string,
+    isMapped: boolean = true
+  ): { tolerance: number; status: ScadaSetpointVerification['status'] } => {
+    const tol = unit === '°C' ? 2.0 : Math.max(0.05, Number((Math.abs(sp) * 0.02).toFixed(3)));
+    if (!isMapped || pv === null || Number.isNaN(pv)) {
+      return { tolerance: tol, status: 'UNMAPPED' };
+    }
+    const absDelta = Math.abs(pv - sp);
+    if (sp > 0 && absDelta <= tol) {
+      return { tolerance: tol, status: 'MATCHED (IN TOLERANCE)' };
+    }
+    if (pv > sp + tol) {
+      return { tolerance: tol, status: 'DEVIATING / OVERSHOOT' };
+    }
+    if (batchState === 'RUNNING' && pv < sp - tol) {
+      return { tolerance: tol, status: 'RAMPING / DOSING' };
+    }
+    return { tolerance: tol, status: 'DEVIATING / OVERSHOOT' };
+  };
+
   // Update Pre-Flight Setpoint Verification Table when active/selected order changes
   useEffect(() => {
     const active = runningOrders[0] || newOrders.find(o => o.id === selectedOrderId) || newOrders[0];
-    if (active?.setpoints) {
-      setScadaVerifications([
-        {
-          id: '1',
-          phaseId: 'PH_SUPPLYMILK',
-          tagName: 'PH11101_SETPOINT_MILK',
-          scriptedSetpoint: active.setpoints.milkSp,
-          scadaActualReadback: active.status === 'RUNNING' ? active.setpoints.milkSp : 0.0,
-          unit: 'L',
-          tolerance: 10.0,
-          status: active.status === 'RUNNING' ? 'Matched' : 'In Progress',
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-        },
-        {
-          id: '2',
-          phaseId: 'PH_SUPPLYSUGAR',
-          tagName: 'PH11202_SETPOINT_SUGAR',
-          scriptedSetpoint: active.setpoints.sugarSp,
-          scadaActualReadback: active.status === 'RUNNING' ? active.setpoints.sugarSp : 0.0,
-          unit: 'kg',
-          tolerance: 2.0,
-          status: active.status === 'RUNNING' ? 'Matched' : 'In Progress',
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-        },
-        {
-          id: '3',
-          phaseId: 'PH_SUPPLYADDITIVE',
-          tagName: 'PH11303_SETPOINT_ADDITIVE',
-          scriptedSetpoint: active.setpoints.additiveSp,
-          scadaActualReadback: active.status === 'RUNNING' ? active.setpoints.additiveSp : 0.0,
-          unit: 'L',
-          tolerance: 1.0,
-          status: active.status === 'RUNNING' ? 'Matched' : 'In Progress',
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-        },
-        {
-          id: '4',
-          phaseId: 'PH_HEATING',
-          tagName: 'PH22101_SETPOINT_TEMP_HOT',
-          scriptedSetpoint: active.setpoints.tempHotSp,
-          scadaActualReadback: active.status === 'RUNNING' ? active.setpoints.tempHotSp : 0.0,
-          unit: '°C',
-          tolerance: 1.0,
-          status: active.status === 'RUNNING' ? 'Matched' : 'In Progress',
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-        },
-        {
-          id: '5',
-          phaseId: 'PH_COOLING',
-          tagName: 'PH22202_SETPOINT_TEMP_COLD',
-          scriptedSetpoint: active.setpoints.tempColdSp,
-          scadaActualReadback: active.status === 'RUNNING' ? active.setpoints.tempColdSp : 0.0,
-          unit: '°C',
-          tolerance: 0.5,
-          status: active.status === 'RUNNING' ? 'Matched' : 'In Progress',
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-        },
-      ]);
+    const sp = active?.setpoints;
+    if (active && sp) {
+      const nowTimeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      const milkTol = Math.max(0.05, Number((sp.milkSp * 0.02).toFixed(3)));
+      const sugarTol = Math.max(0.05, Number((sp.sugarSp * 0.02).toFixed(3)));
+      const addTol = Math.max(0.05, Number((sp.additiveSp * 0.02).toFixed(3)));
+      setScadaVerifications(prev => {
+        const findPrevPv = (phaseId: string) => prev.find(p => p.phaseId === phaseId)?.scadaActualReadback ?? null;
+        const milkPv = findPrevPv('PH_SUPPLYMILK');
+        const sugarPv = findPrevPv('PH_SUPPLYSUGAR');
+        const addPv = findPrevPv('PH_SUPPLYADDITIVE');
+        const hotPv = findPrevPv('PH_HEATING');
+        const coldPv = findPrevPv('PH_COOLING');
+        return [
+          {
+            id: '1',
+            phaseId: 'PH_SUPPLYMILK',
+            tagName: 'PH11101_SETPOINT_MILK',
+            scriptedSetpoint: sp.milkSp,
+            scadaActualReadback: milkPv,
+            unit: 'L',
+            tolerance: milkTol,
+            status: evaluateSpVsPvStatus(sp.milkSp, milkPv, 'L', active.status, milkPv !== null).status,
+            timestamp: nowTimeStr,
+          },
+          {
+            id: '2',
+            phaseId: 'PH_SUPPLYSUGAR',
+            tagName: 'PH11202_SETPOINT_SUGAR',
+            scriptedSetpoint: sp.sugarSp,
+            scadaActualReadback: sugarPv,
+            unit: 'kg',
+            tolerance: sugarTol,
+            status: evaluateSpVsPvStatus(sp.sugarSp, sugarPv, 'kg', active.status, sugarPv !== null).status,
+            timestamp: nowTimeStr,
+          },
+          {
+            id: '3',
+            phaseId: 'PH_SUPPLYADDITIVE',
+            tagName: 'PH11303_SETPOINT_ADDITIVE',
+            scriptedSetpoint: sp.additiveSp,
+            scadaActualReadback: addPv,
+            unit: 'L',
+            tolerance: addTol,
+            status: evaluateSpVsPvStatus(sp.additiveSp, addPv, 'L', active.status, addPv !== null).status,
+            timestamp: nowTimeStr,
+          },
+          {
+            id: '4',
+            phaseId: 'PH_HEATING',
+            tagName: 'PH22101_SETPOINT_TEMP_HOT',
+            scriptedSetpoint: sp.tempHotSp,
+            scadaActualReadback: hotPv,
+            unit: '°C',
+            tolerance: 2.0,
+            status: evaluateSpVsPvStatus(sp.tempHotSp, hotPv, '°C', active.status, hotPv !== null).status,
+            timestamp: nowTimeStr,
+          },
+          {
+            id: '5',
+            phaseId: 'PH_COOLING',
+            tagName: 'PH22202_SETPOINT_TEMP_COLD',
+            scriptedSetpoint: sp.tempColdSp,
+            scadaActualReadback: coldPv,
+            unit: '°C',
+            tolerance: 2.0,
+            status: evaluateSpVsPvStatus(sp.tempColdSp, coldPv, '°C', active.status, coldPv !== null).status,
+            timestamp: nowTimeStr,
+          },
+        ];
+      });
     }
   }, [selectedOrderId, runningOrders.length, newOrders]);
 
@@ -1192,8 +1257,12 @@ export const OperationsProvider: React.FC<{ children: React.ReactNode }> = ({ ch
   // Auto-increment elapsed time for the running order & synchronize timeline stretching
   useEffect(() => {
     const timer = setInterval(() => {
-      setRunningOrders((prev) =>
-        prev.map((order) => {
+      let activeElapsedMinutes: number | null = null;
+      setRunningOrders((prev) => {
+        if (prev.length === 0 || !prev.some((o) => o.status === 'RUNNING')) {
+          return prev;
+        }
+        return prev.map((order) => {
           if (order.status === 'RUNNING') {
             const parts = order.elapsedTime.split(':').map(Number);
             let s = parts[2] + 1;
@@ -1209,18 +1278,19 @@ export const OperationsProvider: React.FC<{ children: React.ReactNode }> = ({ ch
             }
             const pad = (n: number) => n.toString().padStart(2, '0');
             const newElapsedTime = `${pad(h)}:${pad(m)}:${pad(s)}`;
-            const currentElapsedMinutes = h * 60 + m + s / 60;
-
-            // Dynamically stretch timeline nodes for running process line
-            setTimelineNodes(prevNodes =>
-              prevNodes.map(node => computeDynamicNode(node, currentElapsedMinutes, 'RUNNING'))
-            );
-
+            activeElapsedMinutes = h * 60 + m + s / 60;
             return { ...order, elapsedTime: newElapsedTime };
           }
           return order;
-        })
-      );
+        });
+      });
+
+      if (activeElapsedMinutes !== null) {
+        const mins = activeElapsedMinutes;
+        setTimelineNodes((prevNodes) =>
+          prevNodes.map((node) => computeDynamicNode(node, mins, 'RUNNING'))
+        );
+      }
     }, 1000);
     return () => clearInterval(timer);
   }, []);
@@ -1235,26 +1305,25 @@ export const OperationsProvider: React.FC<{ children: React.ReactNode }> = ({ ch
           
           setScadaVerifications(prev => prev.map(v => {
             if (v.phaseId === 'PH_HEATING' || v.tagName.includes('TEMP_HOT')) {
-              const pv = Number((telemetry.temperature_act ?? 0.0).toFixed(1));
-              const diff = Math.abs(pv - v.scriptedSetpoint);
-              const status = diff <= v.tolerance ? 'Matched' : currentBatchState === 'RUNNING' ? 'In Progress' : 'Deviating';
-              return { ...v, scadaActualReadback: pv, status };
+              const hasVal = telemetry.temperature_act !== undefined && telemetry.temperature_act !== null;
+              const pv = hasVal ? Number(Number(telemetry.temperature_act).toFixed(1)) : null;
+              const { tolerance, status } = evaluateSpVsPvStatus(v.scriptedSetpoint, pv, '°C', currentBatchState, hasVal);
+              return { ...v, scadaActualReadback: pv, tolerance, status };
             }
             if (v.phaseId === 'PH_SUPPLYSUGAR' || v.tagName.includes('SETPOINT_SUGAR')) {
-              // Ensure clamped >= 0
-              const pv = Math.max(0.0, Number((telemetry.weight_act ?? 0.0).toFixed(1)));
-              const diff = Math.abs(pv - v.scriptedSetpoint);
-              const status = diff <= v.tolerance ? 'Matched' : currentBatchState === 'RUNNING' ? 'In Progress' : 'Deviating';
-              return { ...v, scadaActualReadback: pv, status };
+              const hasVal = telemetry.weight_act !== undefined && telemetry.weight_act !== null;
+              const pv = hasVal ? Math.max(0.0, Number(Number(telemetry.weight_act).toFixed(1))) : null;
+              const { tolerance, status } = evaluateSpVsPvStatus(v.scriptedSetpoint, pv, 'kg', currentBatchState, hasVal);
+              return { ...v, scadaActualReadback: pv, tolerance, status };
             }
             if (v.phaseId === 'PH_SUPPLYMILK') {
               const milkTag = Array.isArray(telemetry.essential_tags)
                 ? telemetry.essential_tags.find((t: any) => t.tag_name === 'PH11101_FLOWRATE_ACT' || t.tag_name === 'Milk_Flow_PV')
                 : null;
-              const pv = milkTag && typeof milkTag.value === 'number' ? Number(milkTag.value.toFixed(1)) : 0.0;
-              const diff = Math.abs(pv - v.scriptedSetpoint);
-              const status = diff <= v.tolerance ? 'Matched' : 'In Progress';
-              return { ...v, scadaActualReadback: pv, status };
+              const hasVal = Boolean(milkTag && typeof milkTag.value === 'number');
+              const pv = hasVal ? Number(milkTag.value.toFixed(1)) : null;
+              const { tolerance, status } = evaluateSpVsPvStatus(v.scriptedSetpoint, pv, 'L', currentBatchState, hasVal);
+              return { ...v, scadaActualReadback: pv, tolerance, status };
             }
             return v;
           }));
@@ -1311,7 +1380,7 @@ export const OperationsProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         // Graceful degradation when offline
       }
     };
-    const interval = setInterval(pollTelemetry, 1000);
+    const interval = setInterval(pollTelemetry, 2000);
     return () => clearInterval(interval);
   }, [currentBatchState]);
 
@@ -1388,7 +1457,11 @@ export const OperationsProvider: React.FC<{ children: React.ReactNode }> = ({ ch
           } else {
             setLastCommandFeedback(`[HARDWARE HANDSHAKE OK] Process Cell 1 Hardware đã nhận setpoints & xác nhận nạp công thức. [START BATCH] đã sẵn sàng.`);
           }
-          setScadaVerifications(prev => prev.map(v => ({ ...v, timestamp: timeStr, status: 'Matched' })));
+          setScadaVerifications(prev => prev.map(v => ({
+            ...v,
+            timestamp: timeStr,
+            status: evaluateSpVsPvStatus(v.scriptedSetpoint, v.scadaActualReadback, v.unit, 'READY', v.scadaActualReadback !== null).status,
+          })));
         } else {
           setLastCommandFeedback(`[HANDSHAKE CHỜ] Đang chờ xác nhận từ controller active...`);
         }
@@ -1425,12 +1498,19 @@ export const OperationsProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         setCell1Complete(false);
         setCell2Complete(false);
 
-        // Dispatches 500ms CMD_Start pulse via backend batch_engine
+        // Dispatches 500ms CMD_Start pulse via backend batch_engine & polls PLC State_ID
+        let startRes: any = null;
         try {
-          await api.startDualRunBatch({
+          startRes = await api.startDualRunBatch({
             order_code: targetOrder.id,
             execution_mode: executionMode,
           });
+          if (startRes?.state_source === 'PLC_HARDWARE' || startRes?.state_source === 'VIRTUAL_SIM_FALLBACK') {
+            setStateSource(startRes.state_source);
+          }
+          if (typeof startRes?.virtual_state_fallback === 'boolean') {
+            setVirtualStateFallback(startRes.virtual_state_fallback);
+          }
         } catch {
           // Fallback
         }
@@ -1449,14 +1529,8 @@ export const OperationsProvider: React.FC<{ children: React.ReactNode }> = ({ ch
           detail: `Batch [${targetOrder.id}] started execution for Recipe: ${targetOrder.recipeName} (Mode: ${executionMode})`,
         }).catch(() => {});
 
-        // Forward to Kepware via universal phase transition bus
-        api.transitionPhase({
-          order_code: targetOrder.id,
-          phase_id: 'PH_START',
-          state: 'START',
-        }).catch(() => {});
-
-        setLastCommandFeedback(`[START BATCH] Order [${targetOrder.id}] active. Xung CMD_Start (500ms) đã gửi. Runtime timer started.`);
+        const srcLabel = startRes?.state_source === 'PLC_HARDWARE' ? 'PLC HARDWARE ACK' : 'VIRTUAL SIM FALLBACK';
+        setLastCommandFeedback(`[START BATCH] Order [${targetOrder.id}] active (${srcLabel}). Xung CMD_Start (500ms) đã gửi. Runtime timer started.`);
         await refreshDeviationMatrix();
         return;
       }
@@ -1465,6 +1539,14 @@ export const OperationsProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         setCurrentBatchState('HELD');
         setRunningOrders(prev => prev.map(o => ({ ...o, status: 'HELD' })));
         const activeOrder = runningOrders[0];
+        try {
+          const holdRes = await api.holdDualRunBatch({
+            order_code: activeOrder?.id,
+            execution_mode: executionMode,
+          });
+          if (holdRes?.state_source) setStateSource(holdRes.state_source);
+          if (typeof holdRes?.virtual_state_fallback === 'boolean') setVirtualStateFallback(holdRes.virtual_state_fallback);
+        } catch {}
         if (activeOrder) {
           api.updateOrderStatus(activeOrder.id, 'HELD', 'Operator')
             .then(() => {
@@ -1478,13 +1560,9 @@ export const OperationsProvider: React.FC<{ children: React.ReactNode }> = ({ ch
             action: 'BATCH_HOLD',
             detail: `Batch [${activeOrder.id}] execution paused safely by operator`,
           }).catch(() => {});
-          api.transitionPhase({
-            order_code: activeOrder.id,
-            phase_id: 'PH_ALL',
-            state: 'HOLD',
-          }).catch(() => {});
         }
-        setLastCommandFeedback(`[HOLD] ISA-88 #HOLD engaged. Dosing & thermal ramping paused safely.`);
+        await refreshDeviationMatrix();
+        setLastCommandFeedback(`[HOLD] ISA-88 CMD_Hold dispatched. Dosing & thermal ramping paused safely.`);
         return;
       }
 
@@ -1492,6 +1570,14 @@ export const OperationsProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         setCurrentBatchState('RUNNING');
         setRunningOrders(prev => prev.map(o => ({ ...o, status: 'RUNNING' })));
         const activeOrder = runningOrders[0];
+        try {
+          const resumeRes = await api.resumeDualRunBatch({
+            order_code: activeOrder?.id,
+            execution_mode: executionMode,
+          });
+          if (resumeRes?.state_source) setStateSource(resumeRes.state_source);
+          if (typeof resumeRes?.virtual_state_fallback === 'boolean') setVirtualStateFallback(resumeRes.virtual_state_fallback);
+        } catch {}
         if (activeOrder) {
           api.updateOrderStatus(activeOrder.id, 'RUNNING', 'Operator')
             .then(() => {
@@ -1499,13 +1585,9 @@ export const OperationsProvider: React.FC<{ children: React.ReactNode }> = ({ ch
               window.dispatchEvent(new CustomEvent('mes:orders-updated'));
             })
             .catch(() => {});
-          api.transitionPhase({
-            order_code: activeOrder.id,
-            phase_id: 'PH_ALL',
-            state: 'RESUME',
-          }).catch(() => {});
         }
-        setLastCommandFeedback(`[RESUME / RESTART] Batch execution resumed.`);
+        await refreshDeviationMatrix();
+        setLastCommandFeedback(`[RESUME / RESTART] ISA-88 CMD_Resume dispatched. Batch execution resumed.`);
         return;
       }
 
@@ -1613,6 +1695,15 @@ export const OperationsProvider: React.FC<{ children: React.ReactNode }> = ({ ch
           setFinishedOrders(prev => [aborted, ...prev]);
           setRunningOrders(prev => prev.slice(1));
 
+          try {
+            const abortRes = await api.abortDualRunBatch({
+              order_code: aborted.id,
+              execution_mode: executionMode,
+            });
+            if (abortRes?.state_source) setStateSource(abortRes.state_source);
+            if (typeof abortRes?.virtual_state_fallback === 'boolean') setVirtualStateFallback(abortRes.virtual_state_fallback);
+          } catch {}
+
           api.updateOrderStatus(aborted.id, 'ABORTED', 'Operator')
             .then(() => {
               masterData?.refetchData?.();
@@ -1635,7 +1726,8 @@ export const OperationsProvider: React.FC<{ children: React.ReactNode }> = ({ ch
             body: JSON.stringify({ command: 'ABORT' }),
           });
         } catch {}
-        setLastCommandFeedback(`[ABORT] Emergency batch abort executed. Interlocks secured.`);
+        await refreshDeviationMatrix();
+        setLastCommandFeedback(`[ABORT] Emergency batch abort executed (CMD_Abort). Interlocks secured.`);
         return;
       }
     } catch {
@@ -1663,6 +1755,8 @@ export const OperationsProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         cell2Complete,
         cell1Duration,
         cell2Duration,
+        stateSource,
+        virtualStateFallback,
 
         deviationMatrix,
         benchmarkSummary,

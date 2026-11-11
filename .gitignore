@@ -4,4 +4,11 @@ release/
 .env
 backend/.env
 __pycache__/
+*.pyc
 *.db
+*.db-shm
+*.db-wal
+*.tsbuildinfo
+.pytest_cache/
+*.log
+

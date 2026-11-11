@@ -153,69 +153,56 @@ export const Navbar: React.FC<NavbarProps> = ({
   React.useEffect(() => {
     let isMounted = true;
     const checkStatus = async () => {
-      // 1. Direct heartbeat check on SQL Server Store-and-Forward via /api/db/status (3s polling)
-      try {
-        const dbRes = await fetch('/api/db/status');
-        if (dbRes.ok) {
-          const dbData = await dbRes.json();
-          if (!isMounted) return;
-          const isConnected = Boolean(dbData.sql_connected ?? dbData.connected ?? (dbData.status === 'connected'));
-          const count = typeof dbData.buffered_count === 'number' ? dbData.buffered_count : 0;
-          
-          let resolvedMode: SqlStoreForwardMode = 'BUFFERING';
-          if (dbData.mode === 'ONLINE' || dbData.mode === 'SYNCING' || dbData.mode === 'BUFFERING') {
-            resolvedMode = dbData.mode;
-          } else if (isConnected && count === 0) {
-            resolvedMode = 'ONLINE';
-          } else if (isConnected && count > 0) {
-            resolvedMode = 'SYNCING';
-          } else {
-            resolvedMode = 'BUFFERING';
-          }
+      const [dbOutcome, odooOutcome, alarmsOutcome] = await Promise.allSettled([
+        fetch('/api/db/status').then((res) => (res.ok ? res.json() : null)),
+        fetch('/api/erp/odoo/status').then((res) => (res.ok ? res.json() : null)),
+        getActiveAlarms(),
+      ]);
 
-          setSqlMode(resolvedMode);
-          setBufferedCount(count);
-          setSqlLatency(typeof dbData.latency_ms === 'number' ? Math.round(dbData.latency_ms) : null);
+      if (!isMounted) return;
+
+      // 1. Direct heartbeat check on SQL Server Store-and-Forward via /api/db/status
+      if (dbOutcome.status === 'fulfilled' && dbOutcome.value) {
+        const dbData = dbOutcome.value;
+        const isConnected = Boolean(dbData.sql_connected ?? dbData.connected ?? (dbData.status === 'connected'));
+        const count = typeof dbData.buffered_count === 'number' ? dbData.buffered_count : 0;
+
+        let resolvedMode: SqlStoreForwardMode = 'BUFFERING';
+        if (dbData.mode === 'ONLINE' || dbData.mode === 'SYNCING' || dbData.mode === 'BUFFERING') {
+          resolvedMode = dbData.mode;
+        } else if (isConnected && count === 0) {
+          resolvedMode = 'ONLINE';
+        } else if (isConnected && count > 0) {
+          resolvedMode = 'SYNCING';
         } else {
-          if (!isMounted) return;
-          setSqlMode('BUFFERING');
-          setSqlLatency(null);
+          resolvedMode = 'BUFFERING';
         }
-      } catch {
-        if (!isMounted) return;
+
+        setSqlMode(resolvedMode);
+        setBufferedCount(count);
+        setSqlLatency(typeof dbData.latency_ms === 'number' ? Math.round(dbData.latency_ms) : null);
+      } else {
         setSqlMode('BUFFERING');
         setSqlLatency(null);
       }
 
       // 2. Odoo ERP status check
-      try {
-        const odooRes = await fetch('/api/erp/odoo/status');
-        if (odooRes.ok) {
-          const odooData = await odooRes.json();
-          if (!isMounted) return;
-          setOdooStatus(odooData.connected ? 'SYNCED' : 'DISCONNECTED');
-        } else {
-          if (!isMounted) return;
-          setOdooStatus('DISCONNECTED');
-        }
-      } catch {
-        if (!isMounted) return;
+      if (odooOutcome.status === 'fulfilled' && odooOutcome.value) {
+        setOdooStatus(odooOutcome.value.connected ? 'SYNCED' : 'DISCONNECTED');
+      } else {
         setOdooStatus('DISCONNECTED');
       }
 
       // 3. ISA-18.2 Active Alarms polling
-      try {
-        const alarms = await getActiveAlarms();
-        if (isMounted) {
-          setActiveAlarms(Array.isArray(alarms) ? alarms : []);
-        }
-      } catch {
-        if (isMounted) setActiveAlarms([]);
+      if (alarmsOutcome.status === 'fulfilled' && Array.isArray(alarmsOutcome.value)) {
+        setActiveAlarms(alarmsOutcome.value);
+      } else {
+        setActiveAlarms([]);
       }
     };
-    
+
     checkStatus();
-    const interval = setInterval(checkStatus, 3000);
+    const interval = setInterval(checkStatus, 4000);
     return () => {
       isMounted = false;
       clearInterval(interval);
@@ -489,7 +476,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             <div className="h-10 min-w-[40px] flex items-center justify-center shrink-0">
               {!bkLogoError ? (
                 <img
-                  src="/assets/logo_bk.png"
+                  src="./assets/logo_bk.png"
                   alt="Ho Chi Minh City University of Technology"
                   className="h-10 w-auto object-contain filter drop-shadow-sm select-none"
                   onError={() => setBkLogoError(true)}
@@ -509,7 +496,7 @@ export const Navbar: React.FC<NavbarProps> = ({
               <div className="h-10 min-w-[50px] flex items-center justify-center shrink-0">
                 {!titleLogoError ? (
                   <img
-                    src="/assets/logo_title.png"
+                    src="./assets/logo_title.png"
                     alt="MES System Identity"
                     className="h-10 w-auto max-w-[260px] object-contain select-none"
                     onError={() => setTitleLogoError(true)}

@@ -25,8 +25,10 @@ import {
   ShieldCheck, 
   GitFork,
   X,
-  Loader2
+  Loader2,
+  FileCode
 } from 'lucide-react';
+import { IsaB2mmlExportModal } from '../components/isa/IsaB2mmlExportModal';
 
 export const EnterpriseReportCenterView: React.FC = () => {
   const {
@@ -49,6 +51,8 @@ export const EnterpriseReportCenterView: React.FC = () => {
     qualityRecords,
     alarmItems,
   } = useReports();
+
+  const [isIsaModalOpen, setIsIsaModalOpen] = React.useState(false);
 
   const handleExportExcel = async () => {
     let reportName = 'Batch_Production_Report';
@@ -239,6 +243,17 @@ export const EnterpriseReportCenterView: React.FC = () => {
               )}
               <span>Export PDF</span>
             </button>
+
+            {/* Export Standard MESA BatchML / B2MML JSON Payload */}
+            <button
+              type="button"
+              onClick={() => setIsIsaModalOpen(true)}
+              className="h-9 px-4 bg-white border border-slate-300 hover:bg-slate-100 hover:border-slate-400 text-slate-800 text-xs font-semibold uppercase tracking-wider flex items-center gap-1.5 hallmark-focus active:translate-y-px rounded-xs transition-all shadow-xs"
+              title="Preview and Download ANSI/ISA-88 BatchML Electronic Batch Record & B2MML JSON"
+            >
+              <FileCode className="w-3.5 h-3.5 text-sky-600" />
+              <span>Export BatchML / B2MML</span>
+            </button>
           </div>
         </div>
       </div>
@@ -333,6 +348,15 @@ export const EnterpriseReportCenterView: React.FC = () => {
         {activeSubTab === 'user_audit' && <UserAuditTrailTab />}
         {activeSubTab === 'traceability' && <FoodSafetyTraceabilityTab />}
       </div>
+
+      {/* MESA B2MML & BATCHML STANDARD EXPORT MODAL */}
+      <IsaB2mmlExportModal
+        isOpen={isIsaModalOpen}
+        onClose={() => setIsIsaModalOpen(false)}
+        initialSchema={activeSubTab === 'traceability' ? 'performance' : 'bpr'}
+        initialOrderId={batchMasters[0]?.orderId || 'WH/MO/00002'}
+        availableOrders={batchMasters.map(m => ({ orderId: m.orderId, recipeApplied: m.recipeApplied }))}
+      />
     </div>
   );
 };

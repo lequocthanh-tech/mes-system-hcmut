@@ -9,7 +9,10 @@ import {
   RecipeParameter, 
   RecipeDetail, 
   WorkOrder,
-  CalculatedSetpoint
+  CalculatedSetpoint,
+  PmControlBatchType,
+  ParameterScalingRule,
+  PmControlJobSummary
 } from '../types/masterData';
 import * as api from '../services/api';
 import { useConfig } from './ConfigContext';
@@ -63,7 +66,124 @@ export interface MasterDataContextType {
 
 
 
+export const resolveParameterScalingRule = (param: Partial<RecipeParameter>): ParameterScalingRule => {
+  if (param.scalingRule === 'FIXED' || param.scaling_rule === 'FIXED') return 'FIXED';
+  if (param.scalingRule === 'SCALABLE' || param.scaling_rule === 'SCALABLE') return 'SCALABLE';
+
+  const ph = String(param.phaseId || '').trim().toUpperCase();
+  const name = String(param.parameterName || param.materialName || '').trim().toUpperCase();
+  const tag = String(param.targetNodeId || param.tagName || '').trim().toUpperCase();
+  const unit = String(param.unit || '').trim();
+
+  if (
+    ph === 'PH_HEATING' ||
+    ph === 'PH_COOLING' ||
+    ph === 'PH_AGITATING' ||
+    ph === 'PH_MIXING' ||
+    ph === 'PH_HOLDING' ||
+    unit === '°C' ||
+    unit === 'RPM' ||
+    unit === 's' ||
+    /TEMP|NHIỆT|TIME|THỜI GIAN|HOLDING|SPEED|AGITAT|RPM|KHUẤY/i.test(name) ||
+    /TEMP|TIME|HOLDING|SPEED|AGITAT/i.test(tag)
+  ) {
+    return 'FIXED';
+  }
+
+  return 'SCALABLE';
+};
+
+export const resolveRecipeBatchType = (recipe?: MasterRecipe | null): PmControlBatchType => {
+  const raw = String(recipe?.batchType || recipe?.batch_type || 'NORMALIZED_PERCENTAGE').trim().toUpperCase();
+  if (raw === 'NORMALIZED_ABSOLUTE' || raw === 'NORMALIZED_PERCENTAGE' || raw === 'ABSOLUTE_FIXED') {
+    return raw;
+  }
+  return 'NORMALIZED_PERCENTAGE';
+};
+
+export const resolveRecipeNormalizingBase = (recipe?: MasterRecipe | null): number => {
+  const bt = resolveRecipeBatchType(recipe);
+  const raw = recipe?.normalizingBase ?? recipe?.normalizing_base;
+  if (raw !== undefined && raw !== null && Number(raw) > 0) {
+    return Number(raw);
+  }
+  return bt === 'NORMALIZED_PERCENTAGE' ? 100.0 : 1000.0;
+};
+
+export const calculatePmControlJobSummary = (volume: number, recipe: MasterRecipe): PmControlJobSummary => {
+  const batchType = resolveRecipeBatchType(recipe);
+  const normalizingBase = resolveRecipeNormalizingBase(recipe);
+  const targetQuantity = Number(volume) > 0 ? Number(volume) : 0;
+
+  let conversionFactor = 1.0;
+  let batchTypeLabel = 'Normalized Base / Percentage (Sec. 5.8.3)';
+  let sectionRef = 'Siemens PM-CONTROL Sec. 5.8.3';
+  let normalizingBaseUnit = '%';
+  let conversionFormulaText = `${targetQuantity.toLocaleString()} L / 100%`;
+
+  if (batchType === 'NORMALIZED_ABSOLUTE') {
+    conversionFactor = normalizingBase > 0 ? targetQuantity / normalizingBase : 1.0;
+    batchTypeLabel = 'Normalized Base / Absolute (Sec. 5.8.2)';
+    sectionRef = 'Siemens PM-CONTROL Sec. 5.8.2';
+    normalizingBaseUnit = 'L';
+    conversionFormulaText = `${targetQuantity.toLocaleString()} L / ${normalizingBase.toLocaleString()} L`;
+  } else if (batchType === 'ABSOLUTE_FIXED') {
+    conversionFactor = 1.0;
+    batchTypeLabel = 'Product with Fixed Absolute Values (Sec. 5.8.1)';
+    sectionRef = 'Siemens PM-CONTROL Sec. 5.8.1';
+    normalizingBaseUnit = 'L';
+    conversionFormulaText = `1.0000 (Fixed Batch — No Job Control Scaling)`;
+  } else {
+    conversionFactor = targetQuantity / 100.0;
+    batchTypeLabel = 'Normalized Base / Percentage (Sec. 5.8.3)';
+    sectionRef = 'Siemens PM-CONTROL Sec. 5.8.3';
+    normalizingBaseUnit = normalizingBase !== 100 ? `L (100% Base)` : '%';
+    conversionFormulaText = `${targetQuantity.toLocaleString()} L / 100`;
+  }
+
+  const setpoints = calculateControlRecipeSetpoints(volume, recipe);
+  const scalableSetpoints = setpoints.filter((sp) => sp.scalingRule === 'SCALABLE');
+  const totalRawMaterialInput = parseFloat(
+    scalableSetpoints.reduce((acc, sp) => acc + (Number(sp.calculatedValue) || 0), 0).toFixed(2)
+  );
+
+  const expectedNetOutputVolume = batchType === 'ABSOLUTE_FIXED' ? normalizingBase : targetQuantity;
+  const rawLossVolume = parseFloat((totalRawMaterialInput - expectedNetOutputVolume).toFixed(2));
+  const explicitLossPct = Number(recipe.expectedLossPercent ?? recipe.expected_loss_percent ?? 0);
+  const computedLossPct = expectedNetOutputVolume > 0 && rawLossVolume > 0
+    ? parseFloat(((rawLossVolume / expectedNetOutputVolume) * 100.0).toFixed(2))
+    : (explicitLossPct > 0 ? explicitLossPct : 0.0);
+
+  return {
+    batchType,
+    batchTypeLabel,
+    sectionRef,
+    normalizingBase,
+    normalizingBaseUnit,
+    targetQuantity,
+    conversionFactor: parseFloat(conversionFactor.toFixed(4)),
+    conversionFormulaText,
+    totalRawMaterialInput,
+    expectedNetOutputVolume,
+    expectedLossVolume: rawLossVolume > 0 ? rawLossVolume : 0,
+    expectedLossPercent: computedLossPct,
+  };
+};
+
 export const calculateControlRecipeSetpoints = (volume: number, recipe: MasterRecipe): CalculatedSetpoint[] => {
+  const batchType = resolveRecipeBatchType(recipe);
+  const normalizingBase = resolveRecipeNormalizingBase(recipe);
+  const targetQty = Number(volume) > 0 ? Number(volume) : 0;
+
+  let conversionFactor = 1.0;
+  if (batchType === 'NORMALIZED_ABSOLUTE') {
+    conversionFactor = normalizingBase > 0 ? targetQty / normalizingBase : 1.0;
+  } else if (batchType === 'ABSOLUTE_FIXED') {
+    conversionFactor = 1.0;
+  } else {
+    conversionFactor = targetQty / 100.0;
+  }
+
   const params = recipe.parameters || [];
   const milkParam = params.find(p => 
     p.phaseId === 'PH_SUPPLYMILK' || 
@@ -92,32 +212,59 @@ export const calculateControlRecipeSetpoints = (volume: number, recipe: MasterRe
     p.unit === '°C'
   );
 
-  const milkPct = milkParam ? (Number(milkParam.targetSetpoint ?? milkParam.targetValue ?? milkParam.percentage) || 70.0) : 70.0;
-  const sugarPct = sugarParam ? (Number(sugarParam.targetSetpoint ?? sugarParam.targetValue ?? sugarParam.percentage) || 20.0) : 20.0;
-  const additivePct = additiveParam ? (Number(additiveParam.targetSetpoint ?? additiveParam.targetValue ?? additiveParam.percentage) || 10.0) : 10.0;
+  const milkMaster = milkParam ? (Number(milkParam.targetSetpoint ?? milkParam.targetValue ?? milkParam.percentage) || 70.0) : 70.0;
+  const sugarMaster = sugarParam ? (Number(sugarParam.targetSetpoint ?? sugarParam.targetValue ?? sugarParam.percentage) || 20.0) : 20.0;
+  const additiveMaster = additiveParam ? (Number(additiveParam.targetSetpoint ?? additiveParam.targetValue ?? additiveParam.percentage) || 10.0) : 10.0;
   const heatTemp = heatParam ? (Number(heatParam.targetSetpoint ?? heatParam.targetValue) || 138.0) : (recipe.tempHot || 138.0);
+
+  const masterDosingUnit = batchType === 'NORMALIZED_PERCENTAGE' ? '%' : 'L';
+  const masterSugarUnit = batchType === 'NORMALIZED_PERCENTAGE' ? '%' : 'kg';
 
   return [
     {
       name: 'Raw Milk Setpoint',
-      calculatedValue: parseFloat(((volume * milkPct) / 100).toFixed(1)),
+      phaseId: 'PH_SUPPLYMILK',
+      targetNodeId: milkParam?.targetNodeId || 'Recipe_Milk_SP',
+      masterValue: milkMaster,
+      masterUnit: masterDosingUnit,
+      scalingRule: 'SCALABLE',
+      conversionFactor: parseFloat(conversionFactor.toFixed(4)),
+      calculatedValue: parseFloat((milkMaster * conversionFactor).toFixed(2)),
       unit: 'L',
-      percentage: milkPct,
+      percentage: milkMaster,
     },
     {
       name: 'Sugar Syrup Setpoint',
-      calculatedValue: parseFloat(((volume * sugarPct) / 100).toFixed(1)),
+      phaseId: 'PH_SUPPLYSUGAR',
+      targetNodeId: sugarParam?.targetNodeId || 'Recipe_Sugar_SP',
+      masterValue: sugarMaster,
+      masterUnit: masterSugarUnit,
+      scalingRule: 'SCALABLE',
+      conversionFactor: parseFloat(conversionFactor.toFixed(4)),
+      calculatedValue: parseFloat((sugarMaster * conversionFactor).toFixed(2)),
       unit: 'kg',
-      percentage: sugarPct,
+      percentage: sugarMaster,
     },
     {
       name: 'Additive Dosing Setpoint',
-      calculatedValue: parseFloat(((volume * additivePct) / 100).toFixed(1)),
+      phaseId: 'PH_SUPPLYADDITIVE',
+      targetNodeId: additiveParam?.targetNodeId || 'Recipe_Additive_SP',
+      masterValue: additiveMaster,
+      masterUnit: masterDosingUnit,
+      scalingRule: 'SCALABLE',
+      conversionFactor: parseFloat(conversionFactor.toFixed(4)),
+      calculatedValue: parseFloat((additiveMaster * conversionFactor).toFixed(2)),
       unit: 'L',
-      percentage: additivePct,
+      percentage: additiveMaster,
     },
     {
       name: 'Sterilization Temp Setpoint',
+      phaseId: 'PH_HEATING',
+      targetNodeId: heatParam?.targetNodeId || 'Recipe_Temp_SP',
+      masterValue: heatTemp,
+      masterUnit: '°C',
+      scalingRule: 'FIXED',
+      conversionFactor: 1.0,
       calculatedValue: heatTemp,
       unit: '°C',
     },
@@ -349,6 +496,12 @@ export const MasterDataProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         status: 'DRAFT',
         tempHot: parent.tempHot,
         tempCold: parent.tempCold,
+        batchType: parent.batchType || parent.batch_type || 'NORMALIZED_PERCENTAGE',
+        batch_type: parent.batchType || parent.batch_type || 'NORMALIZED_PERCENTAGE',
+        normalizingBase: parent.normalizingBase ?? parent.normalizing_base ?? 100.0,
+        normalizing_base: parent.normalizingBase ?? parent.normalizing_base ?? 100.0,
+        expectedLossPercent: parent.expectedLossPercent ?? parent.expected_loss_percent ?? 0.0,
+        expected_loss_percent: parent.expectedLossPercent ?? parent.expected_loss_percent ?? 0.0,
         parameters: parent.parameters || [],
         user: 'MES Operator / Version Engine',
       });

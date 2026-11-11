@@ -1,7 +1,7 @@
 {
   "endpoint": "opc.tcp://127.0.0.1:49320",
   "timeout_ms": 3000,
-  "sampling_rate_ms": 1000,
+  "sampling_rate_ms": 100,
   "sampling_interval_ms": 100,
   "provider_name": "KEPServerEX v6 - Industrial Connectivity Platform",
   "security_policy": "None",

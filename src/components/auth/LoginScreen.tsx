@@ -171,7 +171,7 @@ export const LoginScreen: React.FC = () => {
             <div className="h-14 min-w-[56px] flex items-center justify-center shrink-0">
               {!bkLogoError ? (
                 <img
-                  src="/assets/logo_bk.png"
+                  src="./assets/logo_bk.png"
                   alt="Ho Chi Minh City University of Technology"
                   className="h-14 w-auto max-w-[85px] object-contain filter drop-shadow-sm select-none"
                   onError={() => setBkLogoError(true)}
@@ -190,7 +190,7 @@ export const LoginScreen: React.FC = () => {
             <div className="h-12 min-w-[80px] flex items-center justify-center shrink-0">
               {!titleLogoError ? (
                 <img
-                  src="/assets/logo_title.png"
+                  src="./assets/logo_title.png"
                   alt="MES System Identity"
                   className="h-12 w-auto max-w-[210px] object-contain select-none"
                   onError={() => setTitleLogoError(true)}

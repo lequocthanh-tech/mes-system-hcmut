@@ -124,6 +124,38 @@ function stopBackendService() {
 }
 
 /**
+ * Resolves a reliable Python runtime environment on Windows
+ * checking for pyodbc and fastapi availability
+ */
+function resolvePythonCommand(scriptPath) {
+  if (process.platform !== 'win32') {
+    return { cmd: 'python3', args: [scriptPath] };
+  }
+
+  const localAppData = process.env.LOCALAPPDATA || '';
+  const py312Exe = path.join(localAppData, 'Programs', 'Python', 'Python312', 'python.exe');
+
+  const candidates = [
+    { cmd: 'py', args: ['-3.12', scriptPath], testArgs: ['-3.12', '-c', 'import pyodbc, fastapi'] },
+    { cmd: py312Exe, args: [scriptPath], testArgs: ['-c', 'import pyodbc, fastapi'] },
+    { cmd: 'py', args: [scriptPath], testArgs: ['-c', 'import pyodbc, fastapi'] },
+    { cmd: 'python', args: [scriptPath], testArgs: ['-c', 'import pyodbc, fastapi'] },
+  ];
+
+  for (const cand of candidates) {
+    try {
+      if (cand.cmd.includes(path.sep) && !require('fs').existsSync(cand.cmd)) {
+        continue;
+      }
+      execSync(`"${cand.cmd}" ${cand.testArgs.join(' ')}`, { stdio: 'ignore', timeout: 2500 });
+      return { cmd: cand.cmd, args: cand.args };
+    } catch (_) {}
+  }
+
+  return { cmd: 'python', args: [scriptPath] };
+}
+
+/**
  * Automated Process Manager:
  * Spawns and supervises backend/kepware_gateway.py in background as managed hidden child process
  */
@@ -152,14 +184,14 @@ function startBackendService() {
 
   killProcessOnPort(8000);
 
-  const pythonPath = process.platform === 'win32' ? 'python' : 'python3';
   const scriptPath = path.join(__dirname, '..', 'backend', 'kepware_gateway.py');
+  const py = resolvePythonCommand(scriptPath);
 
   if (isDev && process.env.MES_DEBUG === 'true') {
-    console.log(`[Lifecycle] Spawning Python Gateway: ${pythonPath} ${scriptPath}`);
+    console.log(`[Lifecycle] Spawning Python Gateway: ${py.cmd} ${py.args.join(' ')}`);
   }
 
-  pythonProcess = spawn(pythonPath, [scriptPath], {
+  pythonProcess = spawn(py.cmd, py.args, {
     cwd: path.join(__dirname, '..'),
     stdio: 'pipe',
     shell: false,

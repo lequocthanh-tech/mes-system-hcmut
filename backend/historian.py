@@ -550,41 +550,69 @@ TAG_UNIT_MAPPING: Dict[str, str] = {
 }
 
 
-def log_telemetry_point(order_code: str, tag_name: str, value: float, unit: Optional[str] = None) -> bool:
-    """Inserts a single telemetry reading into dbo.PLC_Datalog via Store-and-Forward."""
+def log_telemetry_point(
+    order_code: str,
+    tag_name: str,
+    value: float,
+    unit: Optional[str] = None,
+    batch_id: Optional[str] = None,
+    unit_id: Optional[str] = None,
+    phase_id: Optional[str] = None,
+) -> bool:
+    """
+    Inserts a single telemetry reading into dbo.PLC_Datalog via Store-and-Forward,
+    stamped with the ISA-88 batch context (Batch_ID / Unit_ID / Phase_ID).
+    """
     try:
         tag_unit = unit or TAG_UNIT_MAPPING.get(tag_name, "")
         if db_engine:
-            res = db_engine.log_datalog(order_code, tag_name, float(value), tag_unit)
+            res = db_engine.log_datalog(
+                order_code, tag_name, float(value), tag_unit,
+                batch_id=batch_id, unit_id=unit_id, phase_id=phase_id
+            )
             return bool(res)
-        sql = """
-        INSERT INTO PLC_Datalog (OrderCode, TagName, Value, Unit, ReadTime)
-        VALUES (?, ?, ?, ?, GETDATE());
-        """
-        return execute_query(sql, (order_code, tag_name, float(value), tag_unit), timeout=2)
+        return db_connector.log_plc_datalog(
+            order_code, tag_name, float(value), tag_unit,
+            batch_id=batch_id, unit_id=unit_id, phase_id=phase_id
+        )
     except Exception as e:
         logger.debug(f"Failed to log telemetry point ({tag_name}): {e}")
         return False
 
 
-def log_telemetry_batch(records: List[Tuple[str, str, float, Optional[str]]]) -> bool:
-    """Inserts a batch of telemetry readings via Store-and-Forward."""
+def _unpack_telemetry_record(rec: Tuple[Any, ...]) -> Tuple[str, str, float, str, Optional[str], Optional[str], Optional[str]]:
+    """
+    Accepts legacy 4-tuples (OrderCode, TagName, Value, Unit) and ISA-88 7-tuples
+    (OrderCode, TagName, Value, Unit, Batch_ID, Unit_ID, Phase_ID).
+    """
+    oc, tag, val, u = rec[0], rec[1], rec[2], rec[3]
+    batch_id = rec[4] if len(rec) > 4 else None
+    unit_id = rec[5] if len(rec) > 5 else None
+    phase_id = db_connector.normalize_isa88_phase_id(rec[6]) if len(rec) > 6 else None
+    tag_unit = u or TAG_UNIT_MAPPING.get(tag, "")
+    return (
+        oc, tag, float(val), tag_unit,
+        batch_id or oc,
+        unit_id or db_connector.resolve_isa88_unit_id(tag, phase_id),
+        phase_id,
+    )
+
+
+def log_telemetry_batch(records: List[Tuple[Any, ...]]) -> bool:
+    """Inserts a batch of telemetry readings (4-tuple legacy or 7-tuple ISA-88) via Store-and-Forward."""
     if not records:
         return True
     try:
+        unpacked = [_unpack_telemetry_record(r) for r in records]
         if db_engine:
-            for oc, tag, val, u in records:
-                tag_unit = u or TAG_UNIT_MAPPING.get(tag, "")
-                db_engine.log_datalog(oc, tag, float(val), tag_unit)
-            return True
+            return db_engine.log_batch(unpacked)
+        sql, has_ctx = db_connector.build_plc_datalog_insert_sql()
         ops = []
-        for oc, tag, val, u in records:
-            tag_unit = u or TAG_UNIT_MAPPING.get(tag, "")
-            sql = """
-            INSERT INTO PLC_Datalog (OrderCode, TagName, Value, Unit, ReadTime)
-            VALUES (?, ?, ?, ?, GETDATE());
-            """
-            ops.append((sql, (oc, tag, float(val), tag_unit)))
+        for oc, tag, val, tag_unit, b_id, u_id, p_id in unpacked:
+            params: tuple = (oc, tag, val, tag_unit)
+            if has_ctx:
+                params += (b_id, u_id, p_id)
+            ops.append((sql, params))
         return execute_transaction(ops, timeout=3)
     except Exception as e:
         logger.debug(f"Failed to log telemetry batch: {e}")
@@ -595,6 +623,7 @@ def get_telemetry_for_order(order_code: Optional[str] = None, limit: int = 1000)
     """
     Retrieves time-series data from dbo.PLC_Datalog for an order.
     If order_code is 'LATEST' or not specified, finds the most recent logged order.
+    Includes ISA-88 Batch_ID / Unit_ID / Phase_ID when the schema carries them.
     """
     try:
         if not order_code or order_code.upper() in ("LATEST", "CURRENT", "ACTIVE"):
@@ -605,6 +634,10 @@ def get_telemetry_for_order(order_code: Optional[str] = None, limit: int = 1000)
             else:
                 return []
 
+        ctx_cols = ""
+        if db_connector.ensure_plc_datalog_isa88_columns():
+            ctx_cols = ",\n            Batch_ID,\n            Unit_ID,\n            Phase_ID"
+
         sql = f"""
         SELECT TOP {int(limit)}
             LogID,
@@ -612,7 +645,7 @@ def get_telemetry_for_order(order_code: Optional[str] = None, limit: int = 1000)
             TagName,
             Value,
             ISNULL(Unit, '') AS Unit,
-            ReadTime
+            ReadTime{ctx_cols}
         FROM PLC_Datalog
         WHERE OrderCode = ?
         ORDER BY ReadTime ASC;

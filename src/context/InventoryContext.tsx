@@ -568,19 +568,24 @@ export const InventoryProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
     connectWs();
 
-    // Fallback HTTP Polling every 1.0s to guarantee continuous telemetry updates for mapped tanks
+    // Fallback HTTP Polling every 8.0s to reconcile with SQL Server while WebSocket streams real-time updates
     const pollInterval = setInterval(() => {
       if (!isMounted) return;
       api.getInventoryStocks()
         .then((live) => {
           if (live && live.length > 0 && isMounted) {
             setStocks((prev) => {
-              return prev.map((curr) => {
+              let hasAnyChange = false;
+              const next = prev.map((curr) => {
                 const found = live.find((l) => l.tankId === curr.tankId);
                 if (!found) return curr;
                 const fTag = (found.opcNodeId || found.opc_node_id || found.opc_tag || '').trim();
                 const isFMapped = Boolean(fTag && fTag !== '' && !fTag.includes('[CHƯA ÁNH XẠ]'));
                 if (!isFMapped) {
+                  if (curr.pv_quality === '[CHƯA ÁNH XẠ]' && !curr.opc_node_id) {
+                    return curr;
+                  }
+                  hasAnyChange = true;
                   return {
                     ...curr,
                     live_pv: undefined,
@@ -594,26 +599,41 @@ export const InventoryProvider: React.FC<{ children: React.ReactNode }> = ({ chi
                     opc_tag: '',
                   };
                 }
+                const nextPv = found.live_pv !== undefined ? found.live_pv : found.livePv;
+                const nextQual = found.pv_quality || found.pvQuality || 'Good';
+                const nextHigh = found.highLevelActive !== undefined ? found.highLevelActive : curr.highLevelActive;
+                const nextLow = found.lowLevelActive !== undefined ? found.lowLevelActive : curr.lowLevelActive;
+                if (
+                  curr.live_pv === nextPv &&
+                  curr.pv_quality === nextQual &&
+                  curr.opc_node_id === fTag &&
+                  curr.highLevelActive === nextHigh &&
+                  curr.lowLevelActive === nextLow
+                ) {
+                  return curr;
+                }
+                hasAnyChange = true;
                 return {
                   ...curr,
-                  live_pv: found.live_pv !== undefined ? found.live_pv : found.livePv,
-                  livePv: found.live_pv !== undefined ? found.live_pv : found.livePv,
-                  pv_quality: found.pv_quality || found.pvQuality || 'Good',
-                  pvQuality: found.pv_quality || found.pvQuality || 'Good',
+                  live_pv: nextPv,
+                  livePv: nextPv,
+                  pv_quality: nextQual,
+                  pvQuality: nextQual,
                   last_synced: found.last_synced || found.lastSynced || curr.last_synced,
                   lastSynced: found.last_synced || found.lastSynced || curr.lastSynced,
-                  highLevelActive: found.highLevelActive !== undefined ? found.highLevelActive : curr.highLevelActive,
-                  lowLevelActive: found.lowLevelActive !== undefined ? found.lowLevelActive : curr.lowLevelActive,
+                  highLevelActive: nextHigh,
+                  lowLevelActive: nextLow,
                   opc_node_id: fTag,
                   opcNodeId: fTag,
                   opc_tag: fTag,
                 };
               });
+              return hasAnyChange ? next : prev;
             });
           }
         })
         .catch(() => {});
-    }, 1000);
+    }, 8000);
 
     return () => {
       isMounted = false;

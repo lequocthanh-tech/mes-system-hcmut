@@ -1,0 +1,74 @@
+[
+  {
+    "node_id": "ns=2;s=Modbus_TCP.tank.tank1",
+    "name": "tank1",
+    "path": "Modbus_TCP.tank",
+    "data_type": "Float",
+    "unit": "kg",
+    "added_at": "2026-11-04 16:00:00"
+  },
+  {
+    "node_id": "ns=2;s=Modbus_TCP.tank.high",
+    "name": "high",
+    "path": "Modbus_TCP.tank",
+    "data_type": "Boolean",
+    "unit": "BOOL",
+    "added_at": "2026-11-04 16:00:00"
+  },
+  {
+    "node_id": "ns=2;s=Modbus_TCP.tank.low",
+    "name": "low",
+    "path": "Modbus_TCP.tank",
+    "data_type": "Boolean",
+    "unit": "BOOL",
+    "added_at": "2026-11-04 16:00:00"
+  },
+  {
+    "node_id": "ns=2;s=Modbus_TCP.mix.temp",
+    "name": "temp",
+    "path": "Modbus_TCP.mix",
+    "data_type": "Float",
+    "unit": "°C",
+    "added_at": "2026-11-04 16:00:00"
+  },
+  {
+    "node_id": "ns=2;s=Connect_MES.ModRssim.Tag1",
+    "name": "Tag1",
+    "path": "Connect_MES.ModRssim",
+    "data_type": "Float",
+    "unit": "--",
+    "added_at": "2026-11-04 16:00:00"
+  },
+  {
+    "node_id": "ns=2;s=Connect_MES.ModRssim.Tag2",
+    "name": "Tag2",
+    "path": "Connect_MES.ModRssim",
+    "data_type": "Float",
+    "unit": "°C",
+    "added_at": "2026-11-04 16:00:00"
+  },
+  {
+    "node_id": "ns=2;s=Simulation Examples.Functions.Sine1",
+    "name": "Sine1",
+    "path": "Simulation Examples.Functions",
+    "data_type": "Float",
+    "unit": "--",
+    "added_at": "2026-11-04 16:00:00"
+  },
+  {
+    "node_id": "ns=2;s=Simulation Examples.Functions.Ramp1",
+    "name": "Ramp1",
+    "path": "Simulation Examples.Functions",
+    "data_type": "Float",
+    "unit": "--",
+    "added_at": "2026-11-04 16:00:00"
+  },
+  {
+    "node_id": "ns=2;s=loadcell.tank.tank",
+    "name": "tank",
+    "path": "loadcell.tank",
+    "data_type": "Float",
+    "unit": "--",
+    "added_at": "2026-11-04 16:27:17"
+  }
+]

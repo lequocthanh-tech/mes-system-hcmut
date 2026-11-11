@@ -51,6 +51,15 @@ interface QualityContextType {
   summaryData: QualitySummaryData | null;
   isSummaryLoading: boolean;
   refreshSummary: () => Promise<void>;
+
+  // FDA 21 CFR Part 11 Electronic Signature & EBR Release
+  signAndReleaseEbrBatch: (payload: api.EbrSignAndReleasePayload) => Promise<api.EbrSignAndReleaseResult>;
+
+  // End-to-End Lot Genealogy
+  lotGenealogy: api.LotGenealogyData | null;
+  isGenealogyLoading: boolean;
+  fetchLotGenealogy: (orderCode: string) => Promise<api.LotGenealogyData | null>;
+  refreshLiveReports: () => Promise<void>;
 }
 
 const initialBatchRecords: BatchQualityRecord[] = [];
@@ -189,28 +198,78 @@ export const QualityProvider: React.FC<{ children: React.ReactNode }> = ({ child
     await fetchSummary(appliedFilter.from, appliedFilter.to);
   }, [fetchSummary, appliedFilter]);
 
+  // End-to-End Lot Genealogy State
+  const [lotGenealogy, setLotGenealogy] = useState<api.LotGenealogyData | null>(null);
+  const [isGenealogyLoading, setIsGenealogyLoading] = useState<boolean>(false);
+
+  const fetchLotGenealogy = useCallback(async (orderCode: string): Promise<api.LotGenealogyData | null> => {
+    if (!orderCode || orderCode === 'NONE') return null;
+    setIsGenealogyLoading(true);
+    try {
+      const res = await api.getBatchLotGenealogy(orderCode);
+      if (res && res.status === 'success' && res.data) {
+        setLotGenealogy(res.data);
+        return res.data;
+      }
+    } catch (err) {
+      console.warn('[QualityContext] Failed to load lot genealogy:', err);
+    } finally {
+      setIsGenealogyLoading(false);
+    }
+    return null;
+  }, []);
+
   const fetchLiveReports = useCallback(async () => {
     try {
-      const liveReports = await api.getReports();
-      if (liveReports && liveReports.length > 0) {
-        const formatted: BatchQualityRecord[] = liveReports.map((r: any, idx: number) => ({
-          reportId: r.Report_ID || (idx + 1),
-          reportCode: r.ReportCode || `QAR-${r.Report_ID || idx + 1}`,
-          orderId: r.OrderCode || 'WO-UNKNOWN',
-          recipeId: 'RCP-01',
-          recipeName: r.RecipeApplied || 'Fresh Pasteurized UHT Milk',
-          recipeVersion: 'v1.2',
-          startTime: r.CreatedTime ? String(r.CreatedTime).replace('T', ' ').substring(0, 16) : '---',
-          endTime: r.CreatedTime ? String(r.CreatedTime).replace('T', ' ').substring(0, 16) : '---',
-          totalProduced: Number(r.TotalProduced || 1000),
-          status: (r.QualityStatus === 'CONFORMING' || r.QualityStatus === 'PASS') ? 'PASS' : 'FAIL',
-          disposition: (r.DispositionAction || 'RELEASED') as any,
-          avgError: Number(r.AvgDeviationPercent || 0.35),
-          checkedAt: r.CreatedTime ? String(r.CreatedTime).replace('T', ' ').substring(0, 16) : '---',
-          reviewerNotes: `Sign-off: ${r.SignOffBy || 'Lead QA Specialist'}. SQL Server verified.`,
-        }));
+      // First try dedicated batch records endpoint with strict HACCP CCP evaluation
+      let liveRecords: any[] = [];
+      try {
+        liveRecords = await api.getBatchQualityRecords();
+      } catch {
+        liveRecords = [];
+      }
+      if (!liveRecords || liveRecords.length === 0) {
+        liveRecords = await api.getReports();
+      }
+
+      if (liveRecords && liveRecords.length > 0) {
+        const formatted: BatchQualityRecord[] = liveRecords.map((r: any, idx: number) => {
+          const rawStatus = String(r.status || r.QualityStatus || 'PASS').toUpperCase();
+          const disp = String(r.disposition || r.DispositionAction || 'RELEASED').toUpperCase() as BatchDisposition;
+          
+          let computedStatus: BatchQualityRecord['status'] = 'PASS (RELEASE READY)';
+          if (disp === 'QUARANTINED' || rawStatus.includes('FAIL') || rawStatus.includes('QUARANTINE')) {
+            computedStatus = 'FAIL (QUARANTINE)';
+          } else if (rawStatus.includes('WARNING') || disp === 'PENDING_REVIEW') {
+            computedStatus = 'WARNING (HOLD)';
+          } else {
+            computedStatus = 'PASS (RELEASE READY)';
+          }
+
+          return {
+            reportId: r.reportId || r.Report_ID || (idx + 1),
+            reportCode: r.reportCode || r.ReportCode || `QAR-${r.Report_ID || idx + 1}`,
+            orderId: r.orderId || r.OrderCode || 'WO-UNKNOWN',
+            recipeId: r.recipeId || 'RCP-01',
+            recipeName: r.recipeName || r.RecipeApplied || 'Fresh Pasteurized UHT Milk',
+            recipeVersion: r.recipeVersion || 'v1.2',
+            startTime: r.startTime || (r.CreatedTime ? String(r.CreatedTime).replace('T', ' ').substring(0, 16) : '---'),
+            endTime: r.endTime || (r.CreatedTime ? String(r.CreatedTime).replace('T', ' ').substring(0, 16) : '---'),
+            totalProduced: Number(r.totalProduced || r.TotalProduced || 1000),
+            status: computedStatus,
+            disposition: disp,
+            avgError: Number(r.avgError || r.AvgDeviationPercent || 0.15),
+            checkedAt: r.checkedAt || (r.CreatedTime ? String(r.CreatedTime).replace('T', ' ').substring(0, 16) : '---'),
+            reviewerNotes: r.reviewerNotes || `Sign-off: ${r.SignOffBy || r.signedBy || 'Lead QA Specialist'}. SQL Server verified.`,
+            isElectronicallySigned: Boolean(r.isElectronicallySigned || r.signatureHash),
+            signatureHash: r.signatureHash || null,
+            signedBy: r.signedBy || r.SignOffBy,
+            signerRole: r.signerRole || 'QA Specialist',
+            signedAt: r.signedAt || r.checkedAt
+          };
+        });
         setBatchRecords(formatted);
-        setSelectedReportId(formatted[0].reportId);
+        setSelectedReportId((prev) => (prev > 0 ? prev : formatted[0].reportId));
       } else {
         setBatchRecords([]);
         setSelectedReportId(0);
@@ -222,12 +281,28 @@ export const QualityProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
   }, []);
 
+  const signAndReleaseEbrBatch = useCallback(async (payload: api.EbrSignAndReleasePayload): Promise<api.EbrSignAndReleaseResult> => {
+    const res = await api.signAndReleaseEbr(payload);
+    await fetchLiveReports();
+    await fetchSummary(appliedFilter.from, appliedFilter.to);
+    if (payload.order_code) {
+      await fetchLotGenealogy(payload.order_code);
+    }
+    return res;
+  }, [fetchLiveReports, fetchSummary, appliedFilter, fetchLotGenealogy]);
+
   useEffect(() => {
     fetchLiveReports();
     fetchSummary(appliedFilter.from, appliedFilter.to);
   }, [fetchLiveReports, fetchSummary, appliedFilter]);
 
   const selectedBatch = batchRecords.find((b) => b.reportId === selectedReportId) || batchRecords[0];
+
+  useEffect(() => {
+    if (selectedBatch?.orderId) {
+      fetchLotGenealogy(selectedBatch.orderId);
+    }
+  }, [selectedBatch?.orderId, fetchLotGenealogy]);
 
   // Dynamically resolve details for selected batch
   const currentBatchDetails = (selectedReportId && batchDetailsDatabase[selectedReportId])
@@ -242,6 +317,10 @@ export const QualityProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const viewBatchDetail = (reportId: number) => {
     setSelectedReportId(reportId);
     setActiveSubTab('detail');
+    const target = batchRecords.find((b) => b.reportId === reportId);
+    if (target && target.orderId) {
+      fetchLotGenealogy(target.orderId);
+    }
   };
 
   const applyDateFilter = () => {
@@ -357,6 +436,11 @@ export const QualityProvider: React.FC<{ children: React.ReactNode }> = ({ child
         summaryData,
         isSummaryLoading,
         refreshSummary,
+        lotGenealogy,
+        isGenealogyLoading,
+        fetchLotGenealogy,
+        signAndReleaseEbrBatch,
+        refreshLiveReports: fetchLiveReports,
       }}
     >
       {children}

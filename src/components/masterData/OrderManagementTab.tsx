@@ -4,7 +4,11 @@
  */
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { useMasterData, calculateControlRecipeSetpoints } from '../../context/MasterDataContext';
+import {
+  useMasterData,
+  calculateControlRecipeSetpoints,
+  calculatePmControlJobSummary
+} from '../../context/MasterDataContext';
 import { useConfig } from '../../context/ConfigContext';
 import { useIsa88 } from '../../context/Isa88Context';
 import { useOperations } from '../../context/OperationsContext';
@@ -23,7 +27,9 @@ import {
   Sparkles,
   Search,
   Filter,
-  RefreshCw
+  RefreshCw,
+  Scale,
+  Calculator
 } from 'lucide-react';
 import { searchOrders, OrderSearchParams } from '../../services/api';
 import { WorkOrder } from '../../types/masterData';
@@ -221,10 +227,15 @@ export const OrderManagementTab: React.FC = () => {
     return recipes.find((r) => r.id === formData.recipeId) || releasedRecipes[0] || recipes[0];
   }, [recipes, formData.recipeId, releasedRecipes]);
 
-  // Dynamic Control Recipe Setpoint Calculation
+  // Dynamic Control Recipe Setpoint Calculation & Siemens PM-CONTROL Sec. 5.8 Job Summary
   const dynamicSetpoints = useMemo(() => {
     if (!selectedRecipe || !formData.volume) return [];
     return calculateControlRecipeSetpoints(formData.volume, selectedRecipe);
+  }, [formData.volume, selectedRecipe]);
+
+  const pmJobSummary = useMemo(() => {
+    if (!selectedRecipe) return null;
+    return calculatePmControlJobSummary(formData.volume || 0, selectedRecipe);
   }, [formData.volume, selectedRecipe]);
 
   // Selected Customer details
@@ -589,25 +600,75 @@ export const OrderManagementTab: React.FC = () => {
               </span>
             </div>
             <span className="text-[10px] font-mono text-sky-800 bg-sky-50 border border-sky-200 px-2 py-0.5 font-bold">
-              REAL-TIME FORMULATION ENGINE
+              SIEMENS PM-CONTROL SEC. 5.8 ENGINE
             </span>
           </div>
 
           <div className="p-5 space-y-4 text-xs font-mono">
-            {/* Context Summary Header */}
-            <div className="bg-slate-50 border border-slate-200 p-3 grid grid-cols-2 sm:grid-cols-3 gap-2 text-[11px]">
-              <div>
-                <span className="text-slate-500 block uppercase text-[10px]">RECIPE BASE:</span>
-                <span className="font-bold text-slate-900">{selectedRecipe?.code || '---'}</span>
-                <span className="text-slate-500 ml-1">({selectedRecipe?.version})</span>
+            {/* Siemens PM-CONTROL Sec. 5.8 Job Control Math Header */}
+            <div className="bg-slate-50 border border-slate-200 p-3 space-y-2.5">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
+                <div>
+                  <span className="text-slate-500 block uppercase text-[10px]">BATCH TYPE:</span>
+                  <span className="font-bold text-slate-900 block">
+                    {pmJobSummary?.batchType === 'NORMALIZED_ABSOLUTE'
+                      ? 'Normalized Base / Absolute'
+                      : pmJobSummary?.batchType === 'ABSOLUTE_FIXED'
+                      ? 'Fixed Batch / Absolute'
+                      : 'Normalized Base / Percentage'}
+                  </span>
+                  <span className="text-[10px] text-slate-500">{pmJobSummary?.sectionRef}</span>
+                </div>
+
+                <div>
+                  <span className="text-slate-500 block uppercase text-[10px]">NORMALIZING BASE:</span>
+                  <span className="font-bold text-slate-900 tabular-nums block">
+                    {pmJobSummary
+                      ? `${pmJobSummary.normalizingBase.toFixed(2)} ${pmJobSummary.normalizingBaseUnit}`
+                      : '100.00 %'}
+                  </span>
+                  <span className="text-[10px] text-slate-500">
+                    Recipe: {selectedRecipe?.code || '---'} ({selectedRecipe?.version})
+                  </span>
+                </div>
+
+                <div>
+                  <span className="text-slate-500 block uppercase text-[10px]">TARGET ORDER QTY:</span>
+                  <span className="font-bold text-slate-900 tabular-nums block">
+                    {formData.volume.toLocaleString()} L
+                  </span>
+                  <span className="text-[10px] text-slate-500">
+                    Customer: {selectedCustomer?.code || '---'}
+                  </span>
+                </div>
+
+                <div className="bg-white border border-slate-300 px-2.5 py-1.5">
+                  <span className="text-sky-700 font-bold block uppercase text-[10px]">
+                    CONVERSION FACTOR:
+                  </span>
+                  <span className="font-bold text-slate-900 text-sm tabular-nums block">
+                    × {pmJobSummary ? pmJobSummary.conversionFactor.toFixed(4) : '1.0000'}
+                  </span>
+                  <span className="text-[10px] text-slate-500 tabular-nums">
+                    {pmJobSummary?.conversionFormulaText}
+                  </span>
+                </div>
               </div>
-              <div>
-                <span className="text-slate-500 block uppercase text-[10px]">BATCH VOLUME:</span>
-                <span className="font-bold text-slate-900">{formData.volume.toLocaleString()} Liters</span>
-              </div>
-              <div>
-                <span className="text-slate-500 block uppercase text-[10px]">CUSTOMER:</span>
-                <span className="font-bold text-slate-900">{selectedCustomer?.code || '---'}</span>
+
+              {/* Explicit PM-CONTROL Formula Strip */}
+              <div className="pt-2 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                <div className="flex items-center gap-1.5 text-slate-700">
+                  <Calculator className="w-3.5 h-3.5 text-sky-700 shrink-0" />
+                  <span className="font-semibold uppercase">PM-CONTROL Job Control Math:</span>
+                  <span className="text-slate-900 font-bold tabular-nums">
+                    {pmJobSummary?.batchType === 'NORMALIZED_ABSOLUTE' &&
+                      `Factor = Target Qty (${formData.volume.toLocaleString()} L) / Normalizing Base (${pmJobSummary.normalizingBase.toFixed(2)} L) = ${pmJobSummary.conversionFactor.toFixed(4)}`}
+                    {pmJobSummary?.batchType === 'NORMALIZED_PERCENTAGE' &&
+                      `Factor = Target Qty (${formData.volume.toLocaleString()} L) / 100 = ${pmJobSummary.conversionFactor.toFixed(4)}`}
+                    {pmJobSummary?.batchType === 'ABSOLUTE_FIXED' &&
+                      `Factor = 1.0000 (Sec. 5.8.1 Fixed Product — Job Control does not scale quantities)`}
+                  </span>
+                </div>
               </div>
             </div>
 
@@ -621,7 +682,7 @@ export const OrderManagementTab: React.FC = () => {
               return (
                 <div className="p-2.5 bg-sky-50 border border-sky-200 text-sky-950 space-y-1">
                   <div className="flex items-center justify-between">
-                    <span className="inline-flex items-center gap-1 font-bold text-sky-900 text-xs uppercase">
+                    <span className="inline-flex items-center gap-1 font-bold text-sky-900 text-xs uppercase tabular-nums">
                       ⚡ CHIẾN DỊCH ISA-88: {N} MẺ × {vBatch.toFixed(2)} L/MẺ (TẢI AN TOÀN {loadFactor}%)
                     </span>
                     <span className="px-1.5 py-0.2 bg-white text-sky-800 border border-sky-300 font-mono text-[9px] font-bold">
@@ -639,19 +700,21 @@ export const OrderManagementTab: React.FC = () => {
             <div>
               <div className="flex items-center justify-between mb-2">
                 <span className="text-[11px] font-bold text-slate-700 uppercase tracking-wider">
-                  Automated PLC Setpoint Calculations
+                  Automated PLC Control Setpoints (Master × Conversion Factor)
                 </span>
                 <span className="text-[10px] text-slate-500">
-                  Scaled from Master Recipe v{selectedRecipe?.version}
+                  Scaled from Master Recipe {selectedRecipe?.version}
                 </span>
               </div>
 
               <div className="space-y-2">
                 {dynamicSetpoints.map((sp, idx) => {
+                  const isScalable = sp.scalingRule !== 'FIXED';
+                  const factorVal = sp.conversionFactor ?? pmJobSummary?.conversionFactor ?? 1.0;
                   return (
                     <div
                       key={idx}
-                      className="p-2.5 bg-slate-50/80 border border-slate-200 flex items-center justify-between gap-3"
+                      className="p-2.5 bg-slate-50/80 border border-slate-200 flex flex-wrap items-center justify-between gap-3"
                     >
                       <div className="flex items-center gap-2.5">
                         {sp.unit === '°C' ? (
@@ -660,27 +723,87 @@ export const OrderManagementTab: React.FC = () => {
                           <Droplet className="w-4 h-4 text-sky-600 shrink-0" />
                         )}
                         <div>
-                          <div className="font-bold text-slate-900 text-xs">{sp.name}</div>
-                          {sp.percentage !== undefined && (
-                            <div className="text-[10px] text-slate-500">
-                              Formulation Ratio: {sp.percentage}% of total batch volume
-                            </div>
-                          )}
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-slate-900 text-xs">{sp.name}</span>
+                            {isScalable ? (
+                              <span className="px-1.5 py-0.5 bg-emerald-50 border border-emerald-300 text-emerald-800 text-[9px] font-bold uppercase">
+                                SCALABLE (× Factor)
+                              </span>
+                            ) : (
+                              <span className="px-1.5 py-0.5 bg-amber-50 border border-amber-300 text-amber-800 text-[9px] font-bold uppercase">
+                                FIXED (Non-Scalable)
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[10px] text-slate-500 tabular-nums mt-0.5">
+                            {isScalable ? (
+                              <span>
+                                Control SP = Master ({sp.masterValue ?? sp.percentage}{sp.masterUnit || '%'}) × Factor ({factorVal.toFixed(4)})
+                              </span>
+                            ) : (
+                              <span>
+                                Control SP = Master ({sp.masterValue ?? sp.calculatedValue}{sp.masterUnit || sp.unit}) — Unchanged Thermal/Process Parameter
+                              </span>
+                            )}
+                          </div>
                         </div>
                       </div>
 
                       <div className="text-right">
-                        <div className="font-mono font-bold text-slate-900 text-sm">
+                        <div className="font-mono font-bold text-slate-900 text-sm tabular-nums">
                           {sp.calculatedValue.toLocaleString()} {sp.unit}
                         </div>
                         <span className="text-[10px] font-mono text-slate-500 bg-white border border-slate-200 px-1.5 py-0.5 inline-block">
-                          OPC UA SP
+                          {sp.targetNodeId || 'OPC UA SP'}
                         </span>
                       </div>
                     </div>
                   );
                 })}
               </div>
+
+              {/* Summary Line: Total Raw Material Input vs. Expected Net Output Volume */}
+              {pmJobSummary && (
+                <div className="mt-3 p-3 bg-slate-900 text-white border border-slate-900 flex flex-wrap items-center justify-between gap-3 text-xs font-mono tabular-nums">
+                  <div className="flex items-center gap-2">
+                    <Scale className="w-4 h-4 text-sky-400 shrink-0" />
+                    <div>
+                      <span className="text-[10px] text-slate-400 uppercase block">
+                        TOTAL RAW MATERIAL INPUT (SCALED DOSING SUM)
+                      </span>
+                      <span className="font-bold text-sm text-white">
+                        {pmJobSummary.totalRawMaterialInput.toLocaleString()} L/kg
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="h-7 w-px bg-slate-700 hidden sm:block" />
+
+                  <div>
+                    <span className="text-[10px] text-slate-400 uppercase block">
+                      EXPECTED NET OUTPUT VOLUME
+                    </span>
+                    <span className="font-bold text-sm text-emerald-400">
+                      {pmJobSummary.expectedNetOutputVolume.toLocaleString()} L
+                    </span>
+                  </div>
+
+                  <div className="h-7 w-px bg-slate-700 hidden sm:block" />
+
+                  <div className="text-right">
+                    <span className="text-[10px] text-slate-400 uppercase block">
+                      PROCESS LOSS ALLOWANCE (EVAPORATION / PIPING)
+                    </span>
+                    <span className="font-bold text-xs text-sky-300">
+                      {pmJobSummary.expectedLossVolume > 0
+                        ? `+${pmJobSummary.expectedLossVolume.toLocaleString()} L (+${pmJobSummary.expectedLossPercent.toFixed(1)}%)`
+                        : pmJobSummary.expectedLossPercent > 0
+                        ? `+${pmJobSummary.expectedLossPercent.toFixed(1)}% Compensation`
+                        : '0.0 L (0.0% Nominal Balance)'}
+                    </span>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Equipment Pre-Check Indicator */}

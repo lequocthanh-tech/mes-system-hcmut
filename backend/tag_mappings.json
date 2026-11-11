@@ -64,10 +64,10 @@
     "TANK-02_PV": {
       "node_id": "ns=2;s=Modbus_TCP.tank.tank1"
     },
-    "TANK_01_LEVEL": {
+    "TANK_03_LEVEL": {
       "node_id": ""
     },
-    "TANK_03_LEVEL": {
+    "TANK_01_LEVEL": {
       "node_id": ""
     }
   },
@@ -81,7 +81,7 @@
       "Agitator_SP": "",
       "Milk_PV": "",
       "Sugar_PV": "ns=2;s=Modbus_TCP.tank.tank1",
-      "Heating_PV": "ns=2;s=Modbus_TCP.tank.tank1",
+      "Heating_PV": "ns=2;s=loadcell.tank.tank",
       "Cooling_PV": "ns=2;s=Simulation Examples.Functions.Sine1",
       "Agitator_PV": "",
       "CMD_Start": "",
@@ -100,7 +100,12 @@
       "Valve_Weigh1_Out": "",
       "Valve_Weigh2_Out": "",
       "Valve_Weigh3_Out": "",
-      "Out_Weight_PV": ""
+      "Out_Weight_PV": "",
+      "Dosing_Complete_Flag": "",
+      "Flag_Dosing_Done": "",
+      "Batch_ID": "",
+      "Batch_Index": "",
+      "Batch_Total": ""
     },
     "cell2_simit": {
       "Milk_SP": "",
@@ -129,7 +134,10 @@
       "Valve_Weigh1_Out": "",
       "Valve_Weigh2_Out": "",
       "Valve_Weigh3_Out": "",
-      "Out_Weight_PV": ""
+      "Out_Weight_PV": "",
+      "Batch_ID": "",
+      "Batch_Index": "",
+      "Batch_Total": ""
     },
     "weigh1_weight_pv": {
       "node_id": "",
@@ -228,7 +236,7 @@
       "description": "OPC UA node for pc1_uht_temp_sp"
     },
     "pc1_uht_temp_pv": {
-      "node_id": "ns=2;s=Modbus_TCP.tank.tank1",
+      "node_id": "ns=2;s=loadcell.tank.tank",
       "unit": "°C",
       "role": "UHT Heating Temperature Process Value (PV)",
       "dataType": "Float",
@@ -300,7 +308,7 @@
     },
     "mes_lifebit": "",
     "uht_temp_pv": {
-      "node_id": "ns=2;s=Modbus_TCP.tank.tank1",
+      "node_id": "ns=2;s=loadcell.tank.tank",
       "unit": "°C",
       "role": "UHT Heating Temperature Process Value (PV)",
       "dataType": "Float",
@@ -354,7 +362,7 @@
       "description": "Target chilling/cooling temperature setpoint"
     },
     "cooling_temp_pv": {
-      "node_id": "",
+      "node_id": "ns=2;s=Simulation Examples.Functions.Sine1",
       "unit": "°C",
       "role": "Chilling Cooling Temperature Process Value (PV)",
       "dataType": "Float",
@@ -483,6 +491,45 @@
     },
     "Sugar_PV": {
       "node_id": "ns=2;s=Modbus_TCP.tank.tank1"
+    },
+    "dosing_complete_flag": {
+      "node_id": "",
+      "data_type": "Boolean",
+      "type": "Boolean",
+      "role": "PLC 3-Hopper Pre-Weighing Dosing Complete Flag (1=Done)",
+      "description": "Tag báo đã hoàn thành nạp liệu cho 3 bồn trung gian từ PLC tầng dưới (kích hoạt tự động khấu trừ kho)"
+    },
+    "VALVE_COOLER_FB": {
+      "node_id": "ns=2;s=Connect_MES.ModRssim.Tag1",
+      "unit": "--",
+      "role": "Tag VALVE_COOLER_FB",
+      "dataType": "Float",
+      "writable": false,
+      "description": "Custom tag: VALVE_COOLER_FB"
+    },
+    "batch_id": {
+      "node_id": "",
+      "unit": "String",
+      "role": "Sub-Batch ID",
+      "dataType": "String",
+      "writable": true,
+      "description": "Unique Sub-Batch ID written to PLC for product traceability"
+    },
+    "batch_index": {
+      "node_id": "",
+      "unit": "Count",
+      "role": "Current sub-batch index",
+      "dataType": "Int16",
+      "writable": true,
+      "description": "Current sub-batch index within campaign"
+    },
+    "batch_total": {
+      "node_id": "",
+      "unit": "Count",
+      "role": "Total sub-batches count",
+      "dataType": "Int16",
+      "writable": true,
+      "description": "Total sub-batches count for active campaign"
     }
   },
   "quality": {
@@ -501,11 +548,14 @@
       "spec_max": 12.5
     },
     "pasteur_hold_temp": {
-      "node_id": "ns=2;s=Modbus_TCP.tank.tank1",
+      "node_id": "ns=2;s=loadcell.tank.tank",
       "description": "Pasteurizer Holding Tube Critical Temp (CCP-1)",
       "unit": "°C",
       "spec_min": 137.0,
       "spec_max": 140.0
+    },
+    "chiller_temp": {
+      "node_id": "ns=2;s=Simulation Examples.Functions.Sine1"
     }
   },
   "maintenance": {
@@ -542,14 +592,15 @@
     "HEATER_UHT": {
       "vib_rms": "",
       "current_act": "",
-      "temp_act": "ns=2;s=Modbus_TCP.tank.tank1",
+      "temp_act": "ns=2;s=loadcell.tank.tank",
       "run_fb": ""
     },
     "CHILLER_COOL": {
       "vib_rms": "",
       "current_act": "",
-      "temp_act": "",
-      "run_fb": ""
+      "temp_act": "ns=2;s=Simulation Examples.Functions.Sine1",
+      "run_fb": "",
+      "command_run": "ns=2;s=Modbus_TCP.tank.low"
     },
     "VALVE_INLET_MILK": {
       "open_feedback": "",
@@ -584,9 +635,9 @@
     "pump_additive_state": "",
     "agitator_speed_pv": "",
     "agitator_state": "",
-    "heater_uht_temp_pv": "ns=2;s=Modbus_TCP.tank.tank1",
+    "heater_uht_temp_pv": "ns=2;s=loadcell.tank.tank",
     "heater_uht_state": "",
-    "chiller_cool_temp_pv": "",
+    "chiller_cool_temp_pv": "ns=2;s=Simulation Examples.Functions.Sine1",
     "chiller_cool_state": "",
     "pump_outlet_flow_pv": "",
     "pump_outlet_state": ""

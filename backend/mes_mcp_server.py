@@ -27,7 +27,14 @@ DB_CONN_STR = (
 
 def execute_query(sql: str, params=()):
     """Execute SQL query safely and return results as list of dictionaries."""
-    conn = pyodbc.connect(DB_CONN_STR, timeout=10)
+    conn = None
+    try:
+        import db_connector
+        conn = db_connector.get_connection(timeout=5)
+    except Exception:
+        pass
+    if not conn:
+        conn = pyodbc.connect(DB_CONN_STR, timeout=5)
     cursor = conn.cursor()
     cursor.execute(sql, params)
 

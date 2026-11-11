@@ -120,7 +120,11 @@ def analyze_pdm_for_equipment(equipment_code: str = "AGITATOR_MIX", window_size:
     # Extended dynamic maintenance tag lookup from tag_mappings.json
     dynamic_maint_tags = get_maintenance_telemetry_tags(eq_code)
 
-    conn = pyodbc.connect(DB_CONN_STR, timeout=10)
+    try:
+        import db_connector
+        conn = db_connector.get_connection(timeout=5) or pyodbc.connect(DB_CONN_STR, timeout=5)
+    except Exception:
+        conn = pyodbc.connect(DB_CONN_STR, timeout=5)
     cursor = conn.cursor()
 
     # 1. Query equipment master data strictly matching schema

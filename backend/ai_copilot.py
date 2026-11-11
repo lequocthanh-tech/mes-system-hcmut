@@ -87,7 +87,14 @@ ai_router = APIRouter()
 # ==============================================================================
 
 def _get_sql_connection():
-    """Acquires a fresh connection to Microsoft SQL Server."""
+    """Acquires a fresh connection to Microsoft SQL Server via shared db_connector circuit breaker."""
+    try:
+        import db_connector
+        conn = db_connector.get_connection(timeout=3)
+        if conn:
+            return conn
+    except Exception:
+        pass
     import pyodbc
     conn_str = (
         "DRIVER={ODBC Driver 17 for SQL Server};"

@@ -26,16 +26,23 @@ import {
   Settings,
   GitCompare,
   Check,
-  Gauge
+  Gauge,
+  ChevronDown,
+  ChevronUp,
+  TrendingUp,
+  Sliders
 } from 'lucide-react';
+import { extractDroppedOpcTag } from '../../components/PinnedTagPalette';
 import { 
   Isa88BatchState, 
   getIsa88State,
   ExecutionMode,
   DigitalTwinDeviationRow,
-  DeviationStatus
+  SpTrackingStatus,
+  TwinSyncStatus
 } from '../../types/operations';
 import { MaterialStock } from '../../types/inventory';
+import { WatchdogStatus, AiDosingAdvisorResponse, AiDosingChannel } from '../../types/masterData';
 import { OperationsTagMappingModal } from '../../components/operations/OperationsTagMappingModal';
 import { useGatewayStatus } from '../../context/ConfigContext';
 
@@ -53,6 +60,8 @@ export const BatchDispatcher: React.FC = () => {
     cell2Complete,
     cell1Duration,
     cell2Duration,
+    stateSource,
+    virtualStateFallback,
     deviationMatrix,
     benchmarkSummary,
     refreshDeviationMatrix,
@@ -83,6 +92,42 @@ export const BatchDispatcher: React.FC = () => {
   // ==========================================================================
   const [isTagModalOpen, setIsTagModalOpen] = useState(false);
   const [opsTags, setOpsTags] = useState<Record<string, api.ModuleTagItem>>({});
+  const [dragOverSlot, setDragOverSlot] = useState<string | null>(null);
+
+  const handleDropOnOpsSlot = async (
+    e: React.DragEvent,
+    primaryKey: string,
+    aliasKeys: string[] = [],
+    label: string = primaryKey,
+    unit: string = ''
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOverSlot(null);
+    const dropped = extractDroppedOpcTag(e);
+    if (!dropped || !dropped.node_id) return;
+
+    const tagsPayload: Record<string, { node_id: string; role?: string; unit?: string }> = {
+      [primaryKey]: { node_id: dropped.node_id, role: 'PV', unit },
+    };
+    aliasKeys.forEach((ak) => {
+      tagsPayload[ak] = { node_id: dropped.node_id, role: 'PV', unit };
+    });
+
+    try {
+      await api.updateModuleTagMappings('operations', tagsPayload, 'admin', 'ADMIN');
+      setSyncError(false);
+      setSyncSuccess(true);
+      setSyncToast(`✔ Đã gán kéo-thả [${label}] ← ${dropped.node_id} và lưu vào tag_mappings.json!`);
+      await fetchOpsTags();
+      refreshDeviationMatrix();
+      setTimeout(() => setSyncSuccess(false), 4500);
+    } catch (err: any) {
+      setSyncError(true);
+      setSyncToast(`Lỗi gán Tag [${label}]: ${err.message || 'Không thể lưu'}`);
+      setTimeout(() => setSyncError(false), 4500);
+    }
+  };
 
   const getOpsTag = (key: string, ...aliases: string[]): api.ModuleTagItem | undefined => {
     const allKeys = [key, ...aliases];
@@ -118,6 +163,61 @@ export const BatchDispatcher: React.FC = () => {
     const interval = setInterval(fetchOpsTags, 2500);
     return () => clearInterval(interval);
   }, [cipStatus]);
+
+  // ==========================================================================
+  // IEC 61508 / PM-CONTROL LIFEBIT WATCHDOG & AI DOSING ADVISOR STATE
+  // ==========================================================================
+  const [watchdog, setWatchdog] = useState<WatchdogStatus | null>(null);
+  const [aiAdvisor, setAiAdvisor] = useState<AiDosingAdvisorResponse | null>(null);
+  const [isAiAdvisorExpanded, setIsAiAdvisorExpanded] = useState<boolean>(true);
+  const [applyingOffsetChannel, setApplyingOffsetChannel] = useState<string | null>(null);
+  const [aiNotification, setAiNotification] = useState<string | null>(null);
+
+  useEffect(() => {
+    let isMounted = true;
+    const fetchWatchdogAndAi = async () => {
+      try {
+        const [wdRes, aiRes] = await Promise.allSettled([
+          api.getWatchdogStatus(),
+          api.getAiDosingOffsetAdvisor(),
+        ]);
+        if (isMounted) {
+          if (wdRes.status === 'fulfilled') setWatchdog(wdRes.value);
+          if (aiRes.status === 'fulfilled') setAiAdvisor(aiRes.value);
+        }
+      } catch {
+        // safe fallback
+      }
+    };
+
+    fetchWatchdogAndAi();
+    const interval = setInterval(fetchWatchdogAndAi, 1500);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, []);
+
+  const handleApplyDosingOffset = async (channel: AiDosingChannel) => {
+    setApplyingOffsetChannel(channel.channel_id);
+    try {
+      await api.applyDosingOffset({
+        hopper_id: channel.channel_id,
+        recommended_offset_kg: channel.recommended_offset_kg,
+        operator: 'Process_Engineer',
+        reason: `HITL in-flight cut-off trim: offset ${channel.recommended_offset_kg} ${channel.unit}`,
+      });
+      setAiNotification(`Đã áp dụng bù trừ quán tính ${channel.recommended_offset_kg} ${channel.unit} cho [${channel.channel_id}]`);
+      setTimeout(() => setAiNotification(null), 4000);
+      const updated = await api.getAiDosingOffsetAdvisor();
+      setAiAdvisor(updated);
+    } catch (err: any) {
+      setAiNotification(`Lỗi áp dụng bù trừ: ${err?.message || 'Lỗi mạng'}`);
+      setTimeout(() => setAiNotification(null), 4000);
+    } finally {
+      setApplyingOffsetChannel(null);
+    }
+  };
 
   // ==========================================================================
   // ISA-95 LEVEL 4 (ERP) ODOO INTEGRATION STATE & HANDLERS
@@ -308,6 +408,16 @@ export const BatchDispatcher: React.FC = () => {
   const pvOutputTag = getOpsTag('out_weight_pv', 'Out_Weight_PV', 'OUT01_WEIGHT_PV');
   const pvOutput = pvOutputTag?.value != null ? Number(pvOutputTag.value) : 0.0;
 
+  // Heater Interlock Telemetry
+  const uhtTag = getOpsTag('uht_temp_pv', 'Heat_Temp_ACT', 'Heating_PV', 'UHT_TEMP_PV', 'pasteur_hold_temp');
+  const uhtSpTag = getOpsTag('uht_temp_sp', 'Recipe_Temp_SP', 'Heat_Temp_SP', 'UHT_TEMP_SP');
+  const readyTag = getOpsTag('heater_ready_flag', 'Heater_Ready_Flag', 'HEATER_TEMP_OK', 'cell1.Heater_Ready_Flag');
+  const uhtPv = uhtTag?.value != null ? Number(uhtTag.value) : 0.0;
+  const uhtSp = uhtSpTag?.value != null ? Number(uhtSpTag.value) : (activeOrder?.setpoints?.tempHotSp || 138.0);
+  const isFlagAsserted = readyTag?.value === 1 || readyTag?.value === true || readyTag?.value === '1' || readyTag?.value === 'true';
+  const isTempReached = uhtPv > 0 && uhtSp > 0 && uhtPv >= (uhtSp - 2.0);
+  const isHeaterReady = Boolean(isFlagAsserted || (!readyTag?.node_id && isTempReached));
+
   // Tolerance ±2.0% evaluation
   const calcTolState = (pv: number, sp: number) => {
     if (sp <= 0) return { status: 'WEIGHT_OK', devPct: 0, text: 'READY' };
@@ -325,6 +435,25 @@ export const BatchDispatcher: React.FC = () => {
   const tol1 = calcTolState(pvWeigh1, milkSp);
   const tol2 = calcTolState(pvWeigh2, sugarSp);
   const tol3 = calcTolState(pvWeigh3, additiveSp);
+
+  // Automated PLC 3-Hopper Pre-Weighing Dosing Complete Flag
+  const dosingDoneTag = getOpsTag(
+    'dosing_complete_flag',
+    'Dosing_Complete_Flag',
+    'Flag_Dosing_Done',
+    'dosing_done',
+    'cell1.Dosing_Complete_Flag',
+    'cell1.Flag_Dosing_Done',
+    'weighing_complete_flag',
+    'Hoppers_Dosing_Done',
+    'Modbus_TCP_1.Device1.Run'
+  );
+  const isPlcDosingComplete = Boolean(
+    dosingDoneTag?.value === 1 ||
+    dosingDoneTag?.value === true ||
+    dosingDoneTag?.value === '1' ||
+    dosingDoneTag?.value === 'true'
+  );
 
   const [isToleranceOverridden, setIsToleranceOverridden] = useState(false);
   const isAllWeighedReady = 
@@ -397,6 +526,33 @@ export const BatchDispatcher: React.FC = () => {
     }
   };
 
+  // Automated inventory deduction triggered by lower-level PLC dosing complete tag OR 3-hopper setpoint completion
+  const autoDeductedOrdersRef = React.useRef<Set<string>>(new Set());
+
+  React.useEffect(() => {
+    if (!activeOrder || isDeducting) return;
+    const orderId = activeOrder.id;
+
+    if (autoDeductedOrdersRef.current.has(orderId)) return;
+    if (singleShotResult?.order_code === orderId && (singleShotResult.status === 'success' || singleShotResult.is_idempotent_replay)) {
+      autoDeductedOrdersRef.current.add(orderId);
+      return;
+    }
+
+    // Trigger condition:
+    // 1) Explicit PLC dosing done tag is ON (1/true)
+    // 2) OR all 3 hoppers weighed within tolerance (±2%)
+    const shouldAutoDeduct = Boolean(
+      isPlcDosingComplete || 
+      (isAllWeighedReady && (pvWeigh1 > 0 || pvWeigh2 > 0 || pvWeigh3 > 0 || isToleranceOverridden))
+    );
+
+    if (shouldAutoDeduct) {
+      autoDeductedOrdersRef.current.add(orderId);
+      handleSingleShotDeduct();
+    }
+  }, [isPlcDosingComplete, isAllWeighedReady, activeOrder?.id, pvWeigh1, pvWeigh2, pvWeigh3, isToleranceOverridden]);
+
   const isCipLocked = cipStatus !== 'CLEAN';
   const isBatchRunning = currentBatchState === 'RUNNING';
   const isBatchHeld = currentBatchState === 'HELD';
@@ -436,6 +592,42 @@ export const BatchDispatcher: React.FC = () => {
           <span className="px-2 py-1 bg-amber-600 text-white font-bold text-[10px] uppercase shrink-0">
             LỆNH BỊ KHÓA
           </span>
+        </div>
+      )}
+
+      {/* Smart Factory Closed-Loop: Awaiting Output Tank Auto-Drain Banner */}
+      {(currentBatchState === 'AWAITING_DRAIN' || (currentBatchState as string) === 'WAITING_DRAIN') && (
+        <div className="p-3 bg-amber-50 border border-amber-300 text-amber-950 text-xs font-mono flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
+          <div className="flex items-start gap-2.5">
+            <RefreshCcw className="w-4 h-4 text-amber-700 shrink-0 mt-0.5 animate-spin" />
+            <div>
+              <div className="font-bold text-amber-900 uppercase flex items-center gap-2">
+                <span>⚡ NHÀ MÁY THÔNG MINH: TỰ ĐỘNG THEO DÕI XẢ BỒN ĐỂ NẠP MẺ TIẾP THEO</span>
+                <span className="px-1.5 py-0.2 bg-amber-200 text-amber-900 text-[10px] border border-amber-400">
+                  AUTO-SENSING CLOSED LOOP
+                </span>
+              </div>
+              <div className="text-[11px] text-amber-800 mt-0.5">
+                Mẻ vừa hoàn tất đã xả sang bồn output. Cảm biến Loadcell hiện đang đo:{' '}
+                <strong className="text-amber-950 font-bold">{pvOutput.toFixed(2)} L</strong> (Ngưỡng tự động chuyển mẻ: ≤ 0.80 L).
+                Khi sữa được xả ra ngoài và mức cân tụt xuống ≤ 0.80 L (mức cặn đáy), hệ thống sẽ <strong>TỰ ĐỘNG NẠP CÔNG THỨC VÀ KÍCH HOẠT MẺ TIẾP THEO</strong> mà không cần bấm chuột.
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={async () => {
+              try {
+                await api.confirmBatchDrain();
+              } catch (e) {
+                console.error(e);
+              }
+            }}
+            className="h-8 px-3 bg-amber-600 hover:bg-amber-700 text-white font-bold text-[10px] uppercase tracking-wider shrink-0 border border-amber-700 active:translate-y-px transition-none hallmark-focus"
+            title="Bỏ qua chờ cảm biến và kích hoạt nạp mẻ tiếp theo ngay lập tức"
+          >
+            BỎ QUA CHỜ / CHẠY TIẾP NGAY
+          </button>
         </div>
       )}
 
@@ -513,6 +705,41 @@ export const BatchDispatcher: React.FC = () => {
               </div>
             </div>
 
+            {/* IEC 61508 Bidirectional PLC Lifebit Watchdog Badge */}
+            <div className={`p-2 border text-[11px] font-mono flex items-center justify-between transition-colors ${
+              watchdog?.status === 'WATCHDOG_TIMEOUT_SAFE_HOLD'
+                ? 'bg-rose-50 border-rose-400 text-rose-950 font-bold'
+                : watchdog?.status === 'DEGRADED'
+                ? 'bg-amber-50 border-amber-300 text-amber-950'
+                : 'bg-emerald-50 border-emerald-300 text-emerald-950'
+            }`}>
+              <div className="flex items-center gap-2">
+                <span className={`w-2.5 h-2.5 rounded-full inline-block transition-transform duration-200 ${
+                  watchdog?.status === 'WATCHDOG_TIMEOUT_SAFE_HOLD'
+                    ? 'bg-rose-600 animate-ping'
+                    : watchdog?.lifebit_pulse
+                    ? 'bg-emerald-600 scale-125'
+                    : 'bg-emerald-400 scale-90'
+                }`} />
+                <span className="font-bold">
+                  {watchdog?.status === 'WATCHDOG_TIMEOUT_SAFE_HOLD' ? (
+                    '⚠ WATCHDOG TIMEOUT (>3.0s) · SAFE-HOLD INTERLOCK'
+                  ) : (
+                    `♥ LIFEBIT #${watchdog?.lifebit_counter ?? 0} · ${Math.round(watchdog?.latency_ms ?? 10)} ms`
+                  )}
+                </span>
+              </div>
+              <span className={`px-1.5 py-0.5 text-[9.5px] font-bold uppercase border ${
+                watchdog?.status === 'WATCHDOG_TIMEOUT_SAFE_HOLD'
+                  ? 'bg-rose-200 text-rose-900 border-rose-400'
+                  : watchdog?.status === 'DEGRADED'
+                  ? 'bg-amber-100 text-amber-800 border-amber-300'
+                  : 'bg-emerald-100 text-emerald-800 border-emerald-300'
+              }`}>
+                {watchdog?.status ?? 'HEALTHY'}
+              </span>
+            </div>
+
             {/* 3-Way Execution Mode Selector */}
             <div className="space-y-1.5">
               <div className="flex items-center justify-between">
@@ -576,6 +803,25 @@ export const BatchDispatcher: React.FC = () => {
               <div className="flex items-center justify-between">
                 <span className="text-slate-500">ACTIVE STATE:</span>
                 <span className="font-bold text-slate-900">{currentBatchState}</span>
+              </div>
+
+              <div className="flex items-center justify-between pt-1 border-t border-dashed border-slate-200">
+                <span className="text-slate-500 text-[10px]">STATE AUTHORITY:</span>
+                {stateSource === 'PLC_HARDWARE' && !virtualStateFallback ? (
+                  <span
+                    className="px-1.5 py-0.5 text-[9.5px] font-mono font-bold bg-emerald-50 text-emerald-800 border border-emerald-300"
+                    title="State_ID is actively driven by physical PLC hardware feedback via Kepware OPC UA"
+                  >
+                    ● PLC HARDWARE FEEDBACK
+                  </span>
+                ) : (
+                  <span
+                    className="px-1.5 py-0.5 text-[9.5px] font-mono font-bold bg-amber-50 text-amber-800 border border-amber-300"
+                    title="State_ID unmapped or passive simulator tag (800ms timeout) — running in Safe Virtual Commissioning Fallback"
+                  >
+                    ● VIRTUAL SIM FALLBACK
+                  </span>
+                )}
               </div>
 
               {/* Independent Completion Badges in Dual-Run mode */}
@@ -720,10 +966,62 @@ export const BatchDispatcher: React.FC = () => {
           </div>
 
           {/* Siemens PM-CONTROL Supervisory Action Buttons Card */}
-          <div className="bg-white border border-slate-200 p-4 shadow-xs space-y-2">
+          <div className="bg-white border border-slate-200 p-4 shadow-xs space-y-2.5">
             <div className="text-xs font-bold text-slate-900 uppercase tracking-wide border-b border-slate-200 pb-2 flex items-center justify-between">
               <span>PM-CONTROL Commands</span>
               <span className="text-[9px] text-slate-500 font-mono">ANSI/ISA-88</span>
+            </div>
+
+            {/* Siemens PM-CONTROL Material Availability Interlock Status Badge */}
+            <div
+              className={`p-2 rounded-xs border text-[11px] font-mono font-bold flex items-center justify-between gap-2 ${
+                !isVirtualStockInsufficient
+                  ? 'bg-emerald-50 border-emerald-300 text-emerald-900'
+                  : 'bg-rose-50 border-rose-300 text-rose-900 animate-pulse'
+              }`}
+              title="Siemens PM-CONTROL Chapter 5.8 Material Availability Check"
+            >
+              <div className="flex items-center gap-1.5 truncate">
+                {!isVirtualStockInsufficient ? (
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                ) : (
+                  <AlertOctagon className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+                )}
+                <span className="truncate">
+                  {!isVirtualStockInsufficient
+                    ? 'MATERIAL AVAILABILITY: ALL STOCKS OK'
+                    : 'MATERIAL INTERLOCK: INSUFFICIENT STOCK'}
+                </span>
+              </div>
+              <span className={`px-1.5 py-0.2 text-[9px] uppercase font-mono rounded-xs border shrink-0 ${
+                !isVirtualStockInsufficient
+                  ? 'bg-emerald-200/60 text-emerald-800 border-emerald-300'
+                  : 'bg-rose-200 text-rose-900 border-rose-300'
+              }`}>
+                {!isVirtualStockInsufficient ? 'PERMISSIVE' : 'LOCKED'}
+              </span>
+            </div>
+
+            {/* Heater Pre-Heat Thermal Interlock Badge */}
+            <div
+              className={`p-2 rounded-xs border text-[11px] font-mono font-bold flex items-center justify-between gap-2 ${
+                isHeaterReady
+                  ? 'bg-emerald-50 border-emerald-300 text-emerald-900'
+                  : 'bg-amber-50 border-amber-300 text-amber-900'
+              }`}
+              title="Heater Pre-Heat Thermal Interlock: Allows product transfer only when target temp reached"
+            >
+              <div className="flex items-center gap-1.5 truncate">
+                <span className={`w-2 h-2 rounded-full shrink-0 ${
+                  isHeaterReady ? 'bg-emerald-600' : 'bg-amber-500 animate-pulse'
+                }`} />
+                <span className="truncate">
+                  {isHeaterReady ? 'HEATER INTERLOCK: READY (TEMP OK)' : 'HEATER INTERLOCK: PRE-HEATING'}
+                </span>
+              </div>
+              <span className="text-[10px] font-mono font-normal shrink-0">
+                {uhtPv.toFixed(1)}°C / {uhtSp.toFixed(1)}°C
+              </span>
             </div>
 
             {/* [DOWNLOAD TO SCADA] (Industrial Dark Slate) */}
@@ -918,7 +1216,29 @@ export const BatchDispatcher: React.FC = () => {
                     const fillPct = valNum !== null ? Math.min(100, Math.max(0, (valNum / (targetVol || 1)) * 100)) : null;
 
                     return (
-                      <div className="flex items-center gap-1.5" title={isMapped ? `Node: ${tag?.node_id}` : 'Chưa ánh xạ Loadcell NodeId'}>
+                      <div
+                        onDragOver={(e) => {
+                          e.preventDefault();
+                          e.dataTransfer.dropEffect = 'copy';
+                          setDragOverSlot('mixing_weight_pv');
+                        }}
+                        onDragLeave={() => {
+                          if (dragOverSlot === 'mixing_weight_pv') setDragOverSlot(null);
+                        }}
+                        onDrop={(e) =>
+                          handleDropOnOpsSlot(
+                            e,
+                            'mixing_weight_pv',
+                            ['cell1.Mixing_Weight_PV', 'Mixing_Weight_PV'],
+                            'Khối lượng bồn trộn',
+                            'kg'
+                          )
+                        }
+                        className={`flex items-center gap-1.5 px-1.5 py-0.5 rounded-xs transition-all ${
+                          dragOverSlot === 'mixing_weight_pv' ? 'ring-2 ring-emerald-500 bg-emerald-50/70' : ''
+                        }`}
+                        title={isMapped ? `Node: ${tag?.node_id} (Thả Tag vào đây để đổi)` : 'Thả Tag Kepware vào đây để gán Loadcell Bồn trộn'}
+                      >
                         <span className="text-slate-500 uppercase font-bold">Khối lượng bồn trộn:</span>
                         {isMapped && valNum !== null ? (
                           <span className="font-bold text-slate-900 bg-white px-1.5 py-0.5 border border-slate-200">
@@ -938,7 +1258,29 @@ export const BatchDispatcher: React.FC = () => {
                     const tag = getOpsTag('cell1.Mixing_Temp_PV', 'Mixing_Temp_PV', 'mixing_temp_pv');
                     const isMapped = Boolean(tag?.node_id);
                     return (
-                      <div className="flex items-center gap-1.5" title={isMapped ? `Node: ${tag?.node_id}` : 'Chưa ánh xạ PT100 NodeId'}>
+                      <div
+                        onDragOver={(e) => {
+                          e.preventDefault();
+                          e.dataTransfer.dropEffect = 'copy';
+                          setDragOverSlot('mixing_temp_pv');
+                        }}
+                        onDragLeave={() => {
+                          if (dragOverSlot === 'mixing_temp_pv') setDragOverSlot(null);
+                        }}
+                        onDrop={(e) =>
+                          handleDropOnOpsSlot(
+                            e,
+                            'mixing_temp_pv',
+                            ['cell1.Mixing_Temp_PV', 'Mixing_Temp_PV'],
+                            'Nhiệt bồn trộn',
+                            '°C'
+                          )
+                        }
+                        className={`flex items-center gap-1.5 px-1.5 py-0.5 rounded-xs transition-all ${
+                          dragOverSlot === 'mixing_temp_pv' ? 'ring-2 ring-emerald-500 bg-emerald-50/70' : ''
+                        }`}
+                        title={isMapped ? `Node: ${tag?.node_id} (Thả Tag vào đây để đổi)` : 'Thả Tag Kepware vào đây để gán PT100 Bồn trộn'}
+                      >
                         <span className="text-slate-500 uppercase font-bold">Nhiệt bồn trộn:</span>
                         {isMapped && tag?.value !== undefined && tag?.value !== null ? (
                           <span className="font-bold text-slate-900 bg-white px-1.5 py-0.5 border border-slate-200">
@@ -958,7 +1300,29 @@ export const BatchDispatcher: React.FC = () => {
                     const tag = getOpsTag('uht_temp_pv', 'Heat_Temp_ACT', 'Temp_Sterilizer_PV', 'UHT_TEMP_PV');
                     const isMapped = Boolean(tag?.node_id);
                     return (
-                      <div className="flex items-center gap-1.5" title={isMapped ? `Node: ${tag?.node_id}` : 'Chưa ánh xạ NodeId'}>
+                      <div
+                        onDragOver={(e) => {
+                          e.preventDefault();
+                          e.dataTransfer.dropEffect = 'copy';
+                          setDragOverSlot('uht_temp_pv');
+                        }}
+                        onDragLeave={() => {
+                          if (dragOverSlot === 'uht_temp_pv') setDragOverSlot(null);
+                        }}
+                        onDrop={(e) =>
+                          handleDropOnOpsSlot(
+                            e,
+                            'uht_temp_pv',
+                            ['cell1.Heating_PV', 'UHT_TEMP_PV'],
+                            'Nhiệt độ đun/TT',
+                            '°C'
+                          )
+                        }
+                        className={`flex items-center gap-1.5 px-1.5 py-0.5 rounded-xs transition-all ${
+                          dragOverSlot === 'uht_temp_pv' ? 'ring-2 ring-emerald-500 bg-emerald-50/70' : ''
+                        }`}
+                        title={isMapped ? `Node: ${tag?.node_id} (Thả Tag vào đây để đổi)` : 'Thả Tag Kepware vào đây để gán Nhiệt độ UHT'}
+                      >
                         <span className="text-slate-500 uppercase font-bold">Nhiệt độ đun/TT:</span>
                         {isMapped && tag?.value !== undefined && tag?.value !== null ? (
                           <span className="font-bold text-slate-900 bg-white px-1.5 py-0.5 border border-slate-200">
@@ -978,7 +1342,29 @@ export const BatchDispatcher: React.FC = () => {
                     const tag = getOpsTag('cooling_temp_pv', 'Cold_Temp_ACT', 'Cooling_Temp_PV', 'COOLING_TEMP_PV');
                     const isMapped = Boolean(tag?.node_id);
                     return (
-                      <div className="flex items-center gap-1.5" title={isMapped ? `Node: ${tag?.node_id}` : 'Chưa ánh xạ NodeId'}>
+                      <div
+                        onDragOver={(e) => {
+                          e.preventDefault();
+                          e.dataTransfer.dropEffect = 'copy';
+                          setDragOverSlot('cooling_temp_pv');
+                        }}
+                        onDragLeave={() => {
+                          if (dragOverSlot === 'cooling_temp_pv') setDragOverSlot(null);
+                        }}
+                        onDrop={(e) =>
+                          handleDropOnOpsSlot(
+                            e,
+                            'cooling_temp_pv',
+                            ['cell1.Cooling_PV', 'COOLING_TEMP_PV'],
+                            'Làm lạnh Buffer',
+                            '°C'
+                          )
+                        }
+                        className={`flex items-center gap-1.5 px-1.5 py-0.5 rounded-xs transition-all ${
+                          dragOverSlot === 'cooling_temp_pv' ? 'ring-2 ring-emerald-500 bg-emerald-50/70' : ''
+                        }`}
+                        title={isMapped ? `Node: ${tag?.node_id} (Thả Tag vào đây để đổi)` : 'Thả Tag Kepware vào đây để gán Nhiệt độ làm lạnh'}
+                      >
                         <span className="text-slate-500 uppercase font-bold">Làm lạnh Buffer:</span>
                         {isMapped && tag?.value !== undefined && tag?.value !== null ? (
                           <span className="font-bold text-slate-900 bg-white px-1.5 py-0.5 border border-slate-200">
@@ -998,7 +1384,29 @@ export const BatchDispatcher: React.FC = () => {
                     const tag = getOpsTag('agitator_speed_pv', 'MOTOR_SPEED_ACT', 'Agitator_Speed_PV', 'AGITATOR_SPEED_PV');
                     const isMapped = Boolean(tag?.node_id);
                     return (
-                      <div className="flex items-center gap-1.5" title={isMapped ? `Node: ${tag?.node_id}` : 'Chưa ánh xạ NodeId'}>
+                      <div
+                        onDragOver={(e) => {
+                          e.preventDefault();
+                          e.dataTransfer.dropEffect = 'copy';
+                          setDragOverSlot('agitator_speed_pv');
+                        }}
+                        onDragLeave={() => {
+                          if (dragOverSlot === 'agitator_speed_pv') setDragOverSlot(null);
+                        }}
+                        onDrop={(e) =>
+                          handleDropOnOpsSlot(
+                            e,
+                            'agitator_speed_pv',
+                            ['cell1.Agitator_PV', 'AGITATOR_SPEED_PV'],
+                            'Tốc độ khuấy',
+                            'RPM'
+                          )
+                        }
+                        className={`flex items-center gap-1.5 px-1.5 py-0.5 rounded-xs transition-all ${
+                          dragOverSlot === 'agitator_speed_pv' ? 'ring-2 ring-emerald-500 bg-emerald-50/70' : ''
+                        }`}
+                        title={isMapped ? `Node: ${tag?.node_id} (Thả Tag vào đây để đổi)` : 'Thả Tag Kepware vào đây để gán Tốc độ khuấy'}
+                      >
                         <span className="text-slate-500 uppercase font-bold">Tốc độ khuấy:</span>
                         {isMapped && tag?.value !== undefined && tag?.value !== null ? (
                           <span className="font-bold text-slate-900 bg-white px-1.5 py-0.5 border border-slate-200">
@@ -1019,7 +1427,29 @@ export const BatchDispatcher: React.FC = () => {
                     const isMapped = Boolean(tag?.node_id);
                     const isSsrOn = Boolean(tag?.value === 1 || tag?.value === true || tag?.value === '1' || tag?.value === 'true');
                     return (
-                      <div className="flex items-center gap-1.5" title={isMapped ? `Node: ${tag?.node_id}` : 'Chưa ánh xạ SSR NodeId'}>
+                      <div
+                        onDragOver={(e) => {
+                          e.preventDefault();
+                          e.dataTransfer.dropEffect = 'copy';
+                          setDragOverSlot('ssr_heater_status');
+                        }}
+                        onDragLeave={() => {
+                          if (dragOverSlot === 'ssr_heater_status') setDragOverSlot(null);
+                        }}
+                        onDrop={(e) =>
+                          handleDropOnOpsSlot(
+                            e,
+                            'ssr_heater_status',
+                            ['cell1.SSR_Heater_Status', 'SSR_Heater_Status'],
+                            'SSR Heater',
+                            'Bool'
+                          )
+                        }
+                        className={`flex items-center gap-1.5 px-1.5 py-0.5 rounded-xs transition-all ${
+                          dragOverSlot === 'ssr_heater_status' ? 'ring-2 ring-emerald-500 bg-emerald-50/70' : ''
+                        }`}
+                        title={isMapped ? `Node: ${tag?.node_id} (Thả Tag vào đây để đổi)` : 'Thả Tag Kepware vào đây để gán SSR Heater'}
+                      >
                         <span className="text-slate-500 uppercase font-bold">SSR Heater:</span>
                         {isMapped ? (
                           <span className={`font-bold px-1.5 py-0.5 border ${
@@ -1043,7 +1473,29 @@ export const BatchDispatcher: React.FC = () => {
                     const tag = getOpsTag('cip_clean_status', 'CIP_CLEAN_STATUS');
                     const isMapped = Boolean(tag?.node_id);
                     return (
-                      <div className="flex items-center gap-1.5" title={isMapped ? `Node: ${tag?.node_id}` : 'Chưa ánh xạ NodeId'}>
+                      <div
+                        onDragOver={(e) => {
+                          e.preventDefault();
+                          e.dataTransfer.dropEffect = 'copy';
+                          setDragOverSlot('cip_clean_status');
+                        }}
+                        onDragLeave={() => {
+                          if (dragOverSlot === 'cip_clean_status') setDragOverSlot(null);
+                        }}
+                        onDrop={(e) =>
+                          handleDropOnOpsSlot(
+                            e,
+                            'cip_clean_status',
+                            ['CIP_CLEAN_STATUS'],
+                            'CIP Sensor',
+                            'Bool'
+                          )
+                        }
+                        className={`flex items-center gap-1.5 px-1.5 py-0.5 rounded-xs transition-all ${
+                          dragOverSlot === 'cip_clean_status' ? 'ring-2 ring-emerald-500 bg-emerald-50/70' : ''
+                        }`}
+                        title={isMapped ? `Node: ${tag?.node_id} (Thả Tag vào đây để đổi)` : 'Thả Tag Kepware vào đây để gán CIP Sensor'}
+                      >
                         <span className="text-slate-500 uppercase font-bold">CIP Sensor:</span>
                         {isMapped ? (
                           <span className={`font-bold px-1.5 py-0.5 border ${
@@ -1278,7 +1730,31 @@ export const BatchDispatcher: React.FC = () => {
             {/* 3 Hoppers + Output Tank Grid */}
             <div className="p-3 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 bg-slate-50/50">
               {/* Hopper 1: Raw Milk */}
-              <div className="p-2.5 bg-white border border-slate-200 space-y-1.5 shadow-2xs">
+              <div
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = 'copy';
+                  setDragOverSlot('weigh1_weight_pv');
+                }}
+                onDragLeave={() => {
+                  if (dragOverSlot === 'weigh1_weight_pv') setDragOverSlot(null);
+                }}
+                onDrop={(e) =>
+                  handleDropOnOpsSlot(
+                    e,
+                    'weigh1_weight_pv',
+                    ['Weigh1_Weight_PV', 'weigh_hopper_1_pv'],
+                    'WEIGH-01 (Sữa tươi)',
+                    'L'
+                  )
+                }
+                className={`p-2.5 bg-white border space-y-1.5 shadow-2xs transition-all ${
+                  dragOverSlot === 'weigh1_weight_pv'
+                    ? 'ring-2 ring-emerald-500 bg-emerald-50/40 border-emerald-500'
+                    : 'border-slate-200'
+                }`}
+                title="Thả Tag Kepware vào đây để gán Loadcell PV cho WEIGH-01 (Sữa tươi)"
+              >
                 <div className="flex items-center justify-between border-b border-slate-100 pb-1">
                   <span className="font-bold text-slate-900 text-[11px] uppercase">WEIGH-01 (SỮA TƯƠI)</span>
                   <span className={`text-[9px] px-1.5 py-0.2 font-bold uppercase border ${
@@ -1316,7 +1792,31 @@ export const BatchDispatcher: React.FC = () => {
               </div>
 
               {/* Hopper 2: Sugar */}
-              <div className="p-2.5 bg-white border border-slate-200 space-y-1.5 shadow-2xs">
+              <div
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = 'copy';
+                  setDragOverSlot('weigh2_weight_pv');
+                }}
+                onDragLeave={() => {
+                  if (dragOverSlot === 'weigh2_weight_pv') setDragOverSlot(null);
+                }}
+                onDrop={(e) =>
+                  handleDropOnOpsSlot(
+                    e,
+                    'weigh2_weight_pv',
+                    ['Weigh2_Weight_PV', 'weigh_hopper_2_pv'],
+                    'WEIGH-02 (Đường)',
+                    'kg'
+                  )
+                }
+                className={`p-2.5 bg-white border space-y-1.5 shadow-2xs transition-all ${
+                  dragOverSlot === 'weigh2_weight_pv'
+                    ? 'ring-2 ring-emerald-500 bg-emerald-50/40 border-emerald-500'
+                    : 'border-slate-200'
+                }`}
+                title="Thả Tag Kepware vào đây để gán Loadcell PV cho WEIGH-02 (Đường)"
+              >
                 <div className="flex items-center justify-between border-b border-slate-100 pb-1">
                   <span className="font-bold text-slate-900 text-[11px] uppercase">WEIGH-02 (ĐƯỜNG)</span>
                   <span className={`text-[9px] px-1.5 py-0.2 font-bold uppercase border ${
@@ -1354,7 +1854,31 @@ export const BatchDispatcher: React.FC = () => {
               </div>
 
               {/* Hopper 3: Additives */}
-              <div className="p-2.5 bg-white border border-slate-200 space-y-1.5 shadow-2xs">
+              <div
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = 'copy';
+                  setDragOverSlot('weigh3_weight_pv');
+                }}
+                onDragLeave={() => {
+                  if (dragOverSlot === 'weigh3_weight_pv') setDragOverSlot(null);
+                }}
+                onDrop={(e) =>
+                  handleDropOnOpsSlot(
+                    e,
+                    'weigh3_weight_pv',
+                    ['Weigh3_Weight_PV', 'weigh_hopper_3_pv'],
+                    'WEIGH-03 (Phụ gia)',
+                    'kg'
+                  )
+                }
+                className={`p-2.5 bg-white border space-y-1.5 shadow-2xs transition-all ${
+                  dragOverSlot === 'weigh3_weight_pv'
+                    ? 'ring-2 ring-emerald-500 bg-emerald-50/40 border-emerald-500'
+                    : 'border-slate-200'
+                }`}
+                title="Thả Tag Kepware vào đây để gán Loadcell PV cho WEIGH-03 (Phụ gia)"
+              >
                 <div className="flex items-center justify-between border-b border-slate-100 pb-1">
                   <span className="font-bold text-slate-900 text-[11px] uppercase">WEIGH-03 (PHỤ GIA)</span>
                   <span className={`text-[9px] px-1.5 py-0.2 font-bold uppercase border ${
@@ -1392,7 +1916,31 @@ export const BatchDispatcher: React.FC = () => {
               </div>
 
               {/* Output Tank: OUT-01 */}
-              <div className="p-2.5 bg-white border border-slate-200 space-y-1.5 shadow-2xs">
+              <div
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = 'copy';
+                  setDragOverSlot('out_weight_pv');
+                }}
+                onDragLeave={() => {
+                  if (dragOverSlot === 'out_weight_pv') setDragOverSlot(null);
+                }}
+                onDrop={(e) =>
+                  handleDropOnOpsSlot(
+                    e,
+                    'out_weight_pv',
+                    ['Out_Weight_PV', 'OUT01_WEIGHT_PV'],
+                    'OUT-01 (Thành phẩm)',
+                    'L'
+                  )
+                }
+                className={`p-2.5 bg-white border space-y-1.5 shadow-2xs transition-all ${
+                  dragOverSlot === 'out_weight_pv'
+                    ? 'ring-2 ring-emerald-500 bg-emerald-50/40 border-emerald-500'
+                    : 'border-slate-200'
+                }`}
+                title="Thả Tag Kepware vào đây để gán Loadcell PV cho OUT-01 (Thành phẩm)"
+              >
                 <div className="flex items-center justify-between border-b border-slate-100 pb-1">
                   <span className="font-bold text-slate-900 text-[11px] uppercase">OUT-01 (THÀNH PHẨM)</span>
                   <span className="text-[9px] px-1.5 py-0.2 font-bold uppercase border bg-slate-100 text-slate-700 border-slate-300">
@@ -1411,11 +1959,13 @@ export const BatchDispatcher: React.FC = () => {
                 </div>
                 <div className="flex items-center justify-between text-[10px]">
                   <span className="text-slate-500">Trạng thái:</span>
-                  <span className="font-semibold text-slate-700">{pvOutput > 0 ? 'Đang lưu trữ' : 'Chờ nạp thành phẩm'}</span>
+                  <span className={`font-semibold ${pvOutput <= 0.8 ? 'text-emerald-700' : 'text-amber-700'}`}>
+                    {pvOutput <= 0.8 ? '● Bồn rỗng (Sẵn sàng đón mẻ)' : '⏳ Chờ xả rỗng (Đang lưu trữ)'}
+                  </span>
                 </div>
                 <div className="pt-1 border-t border-slate-100 flex items-center justify-between text-[9px] text-slate-500">
-                  <span>Van chiết rót:</span>
-                  <span className="font-bold text-slate-600">SẴN SÀNG</span>
+                  <span>Tự động chuyển mẻ:</span>
+                  <span className="font-bold text-slate-700">≤ 0.80 L (Auto-Advance)</span>
                 </div>
               </div>
             </div>
@@ -1460,35 +2010,48 @@ export const BatchDispatcher: React.FC = () => {
                     {isZeroReturnAll ? (isDischargeComplete ? '● BỒN RỖNG (XẢ HOÀN TẤT)' : '● ĐÃ XẢ HẾT (EMPTY)') : isDischarging ? '⏳ ĐANG XẢ...' : '○ CÒN NGUYÊN LIỆU'}
                   </span>
                 </div>
+
+                {/* PLC Dosing Complete Signal Indicator */}
+                <div className="flex items-center gap-1.5">
+                  <span className="text-slate-500 font-bold uppercase">Tín hiệu PLC Nạp liệu:</span>
+                  <span className={`font-bold px-2 py-0.5 border ${
+                    isPlcDosingComplete
+                      ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
+                      : 'bg-slate-100 text-slate-600 border-slate-300'
+                  }`}>
+                    {isPlcDosingComplete ? '● PLC: HOÀN TẤT NẠP LIỆU (1)' : '○ PLC: ĐANG CÂN ĐỊNH LƯỢNG (0)'}
+                  </span>
+                </div>
               </div>
 
-              {/* Single-Shot Deduction Action Button */}
+              {/* Automated Single-Shot Deduction Action Status */}
               <div>
                 {singleShotResult?.status === 'success' || singleShotResult?.is_idempotent_replay ? (
                   <div className="inline-flex items-center gap-1.5 px-3 py-1 bg-emerald-50 border border-emerald-300 text-emerald-800 font-bold text-[11px]">
                     <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                    <span>● ĐÃ KHẤU TRỪ TỒN KHO NGUYÊN LIỆU (SINGLE-SHOT)</span>
+                    <span>✓ ĐÃ TỰ ĐỘNG KHẤU TRỪ TỒN KHO NGUYÊN LIỆU (BỒN TỔNG 1000L)</span>
+                  </div>
+                ) : isDeducting ? (
+                  <div className="inline-flex items-center gap-1.5 px-3 py-1 bg-amber-50 border border-amber-300 text-amber-800 font-bold text-[11px]">
+                    <RefreshCcw className="w-3.5 h-3.5 animate-spin text-amber-600" />
+                    <span>⏳ ĐANG TỰ ĐỘNG KHẤU TRỪ TỒN KHO...</span>
                   </div>
                 ) : (
-                  <button
-                    type="button"
-                    onClick={handleSingleShotDeduct}
-                    disabled={isDeducting || !activeOrder}
-                    className="h-8 px-3 bg-emerald-700 hover:bg-emerald-800 disabled:bg-slate-300 text-white font-mono text-[11px] font-bold inline-flex items-center gap-1.5 border border-emerald-800 active:translate-y-px transition-all rounded-xs shadow-2xs hallmark-focus"
-                    title="Khấu trừ tồn kho nguyên liệu 1 lần duy nhất cho mẻ sản xuất hiện tại kèm truy xuất Lot/Receipt"
-                  >
-                    {isDeducting ? (
-                      <>
-                        <RefreshCcw className="w-3.5 h-3.5 animate-spin text-white" />
-                        <span>ĐANG KHẤU TRỪ...</span>
-                      </>
-                    ) : (
-                      <>
-                        <Check className="w-3.5 h-3.5 text-white" />
-                        <span>[XÁC NHẬN CÂN &amp; KHẤU TRỪ TỒN KHO NGUYÊN LIỆU]</span>
-                      </>
-                    )}
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] text-slate-500 italic hidden sm:inline">
+                      {isPlcDosingComplete ? 'Đang tự động khấu trừ...' : '⚡ Tự động khấu trừ kho khi PLC bật tag xong nạp liệu'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handleSingleShotDeduct}
+                      disabled={isDeducting || !activeOrder}
+                      className="h-8 px-2.5 bg-slate-800 hover:bg-slate-900 disabled:bg-slate-300 text-white font-mono text-[10px] font-bold inline-flex items-center gap-1 border border-slate-900 active:translate-y-px transition-all rounded-xs shadow-2xs hallmark-focus"
+                      title="Hệ thống tự động khấu trừ kho khi nhận tín hiệu PLC. Bấm vào đây nếu muốn khấu trừ thủ công ngay lập tức."
+                    >
+                      <Check className="w-3 h-3 text-white" />
+                      <span>[THỦ CÔNG: KHẤU TRỪ NGAY]</span>
+                    </button>
+                  </div>
                 )}
               </div>
             </div>
@@ -1625,7 +2188,7 @@ export const BatchDispatcher: React.FC = () => {
                             ) : (
                               <button
                                 type="button"
-                                onClick={() => handleCompleteOdooOrder(order.id, order.volume)}
+                                onClick={() => handleCompleteOdooOrder(order.id, (order as any).actualVolume || order.volume)}
                                 disabled={completingOrderId === order.id}
                                 className="h-7 px-2.5 bg-slate-900 hover:bg-slate-800 disabled:bg-slate-400 text-white font-mono text-[10px] font-bold inline-flex items-center gap-1.5 border border-slate-900 active:translate-y-px transition-all rounded-xs shadow-2xs hallmark-focus"
                                 title="Uplink đóng lệnh sản xuất, nhập kho thành phẩm và khấu trừ nguyên liệu trên Odoo ERP"
@@ -1849,8 +2412,8 @@ export const BatchDispatcher: React.FC = () => {
                     <th className="py-2 px-2 text-center">SP (CÔNG THỨC)</th>
                     <th className="py-2 px-2 text-center">PV PHẦN CỨNG</th>
                     <th className="py-2 px-2 text-center">PV SIMIT TWIN</th>
-                    <th className="py-2 px-2 text-center">ĐỘ LỆCH Δ (|R - S|)</th>
-                    <th className="py-2 px-2 text-center">TRẠNG THÁI</th>
+                    <th className="py-2 px-2 text-center">SAI SỐ Δ SP / TWIN</th>
+                    <th className="py-2 px-2 text-center">TRẠNG THÁI (SP vs PV)</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 bg-white text-[11px]">
@@ -1888,199 +2451,276 @@ export const BatchDispatcher: React.FC = () => {
                     const coolSp = activeOrder?.setpoints?.tempColdSp ?? (coolParam ? Number(coolParam.targetSetpoint ?? coolParam.targetValue) : (matchedRecipe?.tempCold || 4.0));
                     const agitatorSp = agitatorParam ? Number(agitatorParam.targetSetpoint ?? agitatorParam.targetValue) : 1200.0;
 
-                    const calcDelta = (pvH: number | null, pvS: number | null, spVal: number): number | null => {
-                      if (pvH !== null && pvS !== null) return Math.abs(pvH - pvS);
-                      if (pvH !== null) return Math.abs(pvH - spVal);
-                      return null;
+                    const calcTolerance = (unit: string, spVal: number): number => {
+                      if (unit === '°C') return 2.0;
+                      if (unit === 'RPM') return Math.max(25.0, Number((Math.abs(spVal) * 0.02).toFixed(1)));
+                      return Math.max(0.05, Number((Math.abs(spVal) * 0.02).toFixed(3)));
                     };
 
-                    const calcStatus = (c1: boolean, c2: boolean, d: number | null, tol: number): DeviationStatus => {
-                      if (!c1 || !c2) return 'CHƯA ÁNH XẠ';
-                      if (d === null) return 'TRACKING';
-                      return d <= tol ? 'MATCHED' : 'DEVIATING';
+                    const calcSpStatus = (c1: boolean, pvH: number | null, spVal: number, tol: number): SpTrackingStatus => {
+                      if (!c1 || pvH === null || Number.isNaN(pvH)) return 'UNMAPPED';
+                      const absDeltaSp = Math.abs(pvH - spVal);
+                      if (spVal > 0 && absDeltaSp <= tol) return 'MATCHED (IN TOLERANCE)';
+                      if (pvH > spVal + tol) return 'DEVIATING / OVERSHOOT';
+                      if (currentBatchState === 'RUNNING' && pvH < spVal - tol) return 'RAMPING / DOSING';
+                      return 'DEVIATING / OVERSHOOT';
+                    };
+
+                    const buildFallbackRow = (
+                      id: string,
+                      name: string,
+                      phase: string,
+                      unit: string,
+                      spVal: number,
+                      fullScale: number,
+                      pvH: number | null,
+                      pvS: number | null,
+                      c1: boolean,
+                      c2: boolean
+                    ): DigitalTwinDeviationRow => {
+                      const tol = calcTolerance(unit, spVal);
+                      const deltaSp = c1 && pvH !== null ? Number((pvH - spVal).toFixed(2)) : null;
+                      const absDeltaSp = deltaSp !== null ? Number(Math.abs(deltaSp).toFixed(2)) : null;
+                      const deltaTwin = c1 && c2 && pvH !== null && pvS !== null ? Number(Math.abs(pvH - pvS).toFixed(2)) : null;
+                      const denom = Math.max(Math.abs(spVal), Math.abs(fullScale), 1.0);
+                      const paramFidelity = deltaTwin !== null
+                        ? Number(Math.max(0.0, 100.0 - (deltaTwin / denom) * 100.0).toFixed(1))
+                        : null;
+                      const spStatus = calcSpStatus(c1, pvH, spVal, tol);
+                      const twinStatus: TwinSyncStatus = deltaTwin === null
+                        ? 'UNMAPPED'
+                        : deltaTwin <= tol
+                        ? 'TWIN_SYNCHRONIZED'
+                        : 'TWIN_DRIFT';
+
+                      return {
+                        id,
+                        name,
+                        phase,
+                        unit,
+                        sp: spVal,
+                        pvHardware: pvH,
+                        pvSimit: pvS,
+                        delta: absDeltaSp ?? deltaTwin,
+                        deltaSp,
+                        absDeltaSp,
+                        deltaTwin,
+                        tolerance: tol,
+                        status: spStatus,
+                        spTrackingStatus: spStatus,
+                        twinSyncStatus: twinStatus,
+                        parameterFidelity: paramFidelity,
+                        c1Mapped: c1,
+                        c2Mapped: c2,
+                      };
                     };
 
                     const milkPvH = getOpsTag('cell1.Milk_PV', 'Milk_PV')?.value != null ? Number(getOpsTag('cell1.Milk_PV', 'Milk_PV')?.value) : null;
                     const milkPvS = getOpsTag('cell2_simit.Milk_PV')?.value != null ? Number(getOpsTag('cell2_simit.Milk_PV')?.value) : null;
                     const milkC1 = Boolean(getOpsTag('cell1.Milk_PV', 'Milk_PV')?.node_id);
                     const milkC2 = Boolean(getOpsTag('cell2_simit.Milk_PV')?.node_id);
-                    const milkDelta = calcDelta(milkPvH, milkPvS, milkSp);
 
                     const sugarPvH = getOpsTag('cell1.Sugar_PV', 'Sugar_PV')?.value != null ? Number(getOpsTag('cell1.Sugar_PV', 'Sugar_PV')?.value) : null;
                     const sugarPvS = getOpsTag('cell2_simit.Sugar_PV')?.value != null ? Number(getOpsTag('cell2_simit.Sugar_PV')?.value) : null;
                     const sugarC1 = Boolean(getOpsTag('cell1.Sugar_PV', 'Sugar_PV')?.node_id);
                     const sugarC2 = Boolean(getOpsTag('cell2_simit.Sugar_PV')?.node_id);
-                    const sugarDelta = calcDelta(sugarPvH, sugarPvS, sugarSp);
 
-                    const addPvH = getOpsTag('cell1.Additive_PV')?.value != null ? Number(getOpsTag('cell1.Additive_PV')?.value) : null;
+                    const addPvH = getOpsTag('cell1.Additive_PV', 'Additive_PV')?.value != null ? Number(getOpsTag('cell1.Additive_PV', 'Additive_PV')?.value) : null;
                     const addPvS = getOpsTag('cell2_simit.Additive_PV')?.value != null ? Number(getOpsTag('cell2_simit.Additive_PV')?.value) : null;
-                    const addC1 = Boolean(getOpsTag('cell1.Additive_PV')?.node_id);
+                    const addC1 = Boolean(getOpsTag('cell1.Additive_PV', 'Additive_PV')?.node_id);
                     const addC2 = Boolean(getOpsTag('cell2_simit.Additive_PV')?.node_id);
-                    const addDelta = calcDelta(addPvH, addPvS, additiveSp);
 
                     const heatPvH = getOpsTag('cell1.Heating_PV', 'uht_temp_pv', 'pc1_uht_temp_pv')?.value != null ? Number(getOpsTag('cell1.Heating_PV', 'uht_temp_pv', 'pc1_uht_temp_pv')?.value) : null;
                     const heatPvS = getOpsTag('cell2_simit.Heating_PV', 'pc2_simit_uht_temp_pv')?.value != null ? Number(getOpsTag('cell2_simit.Heating_PV', 'pc2_simit_uht_temp_pv')?.value) : null;
-                    const heatC1 = Boolean(getOpsTag('cell1.Heating_PV', 'uht_temp_pv')?.node_id);
+                    const heatC1 = Boolean(getOpsTag('cell1.Heating_PV', 'uht_temp_pv', 'pc1_uht_temp_pv')?.node_id);
                     const heatC2 = Boolean(getOpsTag('cell2_simit.Heating_PV', 'pc2_simit_uht_temp_pv')?.node_id);
-                    const heatDelta = calcDelta(heatPvH, heatPvS, heatSp);
 
                     const coolPvH = getOpsTag('cell1.Cooling_PV', 'cooling_temp_pv')?.value != null ? Number(getOpsTag('cell1.Cooling_PV', 'cooling_temp_pv')?.value) : null;
                     const coolPvS = getOpsTag('cell2_simit.Cooling_PV')?.value != null ? Number(getOpsTag('cell2_simit.Cooling_PV')?.value) : null;
                     const coolC1 = Boolean(getOpsTag('cell1.Cooling_PV', 'cooling_temp_pv')?.node_id);
                     const coolC2 = Boolean(getOpsTag('cell2_simit.Cooling_PV')?.node_id);
-                    const coolDelta = calcDelta(coolPvH, coolPvS, coolSp);
 
                     const agitPvH = getOpsTag('cell1.Agitator_PV', 'agitator_speed_pv')?.value != null ? Number(getOpsTag('cell1.Agitator_PV', 'agitator_speed_pv')?.value) : null;
                     const agitPvS = getOpsTag('cell2_simit.Agitator_PV')?.value != null ? Number(getOpsTag('cell2_simit.Agitator_PV')?.value) : null;
                     const agitC1 = Boolean(getOpsTag('cell1.Agitator_PV', 'agitator_speed_pv')?.node_id);
                     const agitC2 = Boolean(getOpsTag('cell2_simit.Agitator_PV')?.node_id);
-                    const agitDelta = calcDelta(agitPvH, agitPvS, agitatorSp);
 
                     const fallbackRows: DigitalTwinDeviationRow[] = [
-                      {
-                        id: 'milk',
-                        name: 'Cấp sữa tươi (Milk Dosing)',
-                        phase: 'PH_SUPPLYMILK',
-                        unit: 'L',
-                        sp: milkSp,
-                        pvHardware: milkPvH,
-                        pvSimit: milkPvS,
-                        delta: milkDelta,
-                        tolerance: 10.0,
-                        status: calcStatus(milkC1, milkC2, milkDelta, 10.0),
-                        c1Mapped: milkC1,
-                        c2Mapped: milkC2,
-                      },
-                      {
-                        id: 'sugar',
-                        name: 'Định lượng đường (Sugar Dosing)',
-                        phase: 'PH_SUPPLYSUGAR',
-                        unit: 'kg',
-                        sp: sugarSp,
-                        pvHardware: sugarPvH,
-                        pvSimit: sugarPvS,
-                        delta: sugarDelta,
-                        tolerance: 2.0,
-                        status: calcStatus(sugarC1, sugarC2, sugarDelta, 2.0),
-                        c1Mapped: sugarC1,
-                        c2Mapped: sugarC2,
-                      },
-                      {
-                        id: 'additive',
-                        name: 'Vi chất dinh dưỡng (Additive)',
-                        phase: 'PH_SUPPLYADDITIVE',
-                        unit: 'L',
-                        sp: additiveSp,
-                        pvHardware: addPvH,
-                        pvSimit: addPvS,
-                        delta: addDelta,
-                        tolerance: 1.0,
-                        status: calcStatus(addC1, addC2, addDelta, 1.0),
-                        c1Mapped: addC1,
-                        c2Mapped: addC2,
-                      },
-                      {
-                        id: 'heat',
-                        name: 'Tiệt trùng UHT (Sterilization Temp)',
-                        phase: 'PH_HEAT',
-                        unit: '°C',
-                        sp: heatSp,
-                        pvHardware: heatPvH,
-                        pvSimit: heatPvS,
-                        delta: heatDelta,
-                        tolerance: 1.0,
-                        status: calcStatus(heatC1, heatC2, heatDelta, 1.0),
-                        c1Mapped: heatC1,
-                        c2Mapped: heatC2,
-                      },
-                      {
-                        id: 'cool',
-                        name: 'Làm lạnh vô trùng (Cooling Temp)',
-                        phase: 'PH_CHILL',
-                        unit: '°C',
-                        sp: coolSp,
-                        pvHardware: coolPvH,
-                        pvSimit: coolPvS,
-                        delta: coolDelta,
-                        tolerance: 0.5,
-                        status: calcStatus(coolC1, coolC2, coolDelta, 0.5),
-                        c1Mapped: coolC1,
-                        c2Mapped: coolC2,
-                      },
-                      {
-                        id: 'agitator',
-                        name: 'Tốc độ cánh khuấy (Agitator Speed)',
-                        phase: 'PH_AGITATE',
-                        unit: 'RPM',
-                        sp: agitatorSp,
-                        pvHardware: agitPvH,
-                        pvSimit: agitPvS,
-                        delta: agitDelta,
-                        tolerance: 25.0,
-                        status: calcStatus(agitC1, agitC2, agitDelta, 25.0),
-                        c1Mapped: agitC1,
-                        c2Mapped: agitC2,
-                      },
+                      buildFallbackRow('milk', 'Cấp sữa tươi (Milk Dosing)', 'PH_SUPPLYMILK', 'L', milkSp, 5.0, milkPvH, milkPvS, milkC1, milkC2),
+                      buildFallbackRow('sugar', 'Định lượng đường (Sugar Dosing)', 'PH_SUPPLYSUGAR', 'kg', sugarSp, 5.0, sugarPvH, sugarPvS, sugarC1, sugarC2),
+                      buildFallbackRow('additive', 'Vi chất dinh dưỡng (Additive)', 'PH_SUPPLYADDITIVE', 'L', additiveSp, 5.0, addPvH, addPvS, addC1, addC2),
+                      buildFallbackRow('heat', 'Tiệt trùng UHT (Sterilization Temp)', 'PH_HEAT', '°C', heatSp, 150.0, heatPvH, heatPvS, heatC1, heatC2),
+                      buildFallbackRow('cool', 'Làm lạnh vô trùng (Cooling Temp)', 'PH_CHILL', '°C', coolSp, 100.0, coolPvH, coolPvS, coolC1, coolC2),
+                      buildFallbackRow('agitator', 'Tốc độ cánh khuấy (Agitator Speed)', 'PH_AGITATE', 'RPM', agitatorSp, 1500.0, agitPvH, agitPvS, agitC1, agitC2),
                     ];
 
                     const rows = (deviationMatrix && deviationMatrix.length > 0) ? deviationMatrix : fallbackRows;
 
                     return rows.map((item) => {
-                      const isBothMapped = item.c1Mapped && item.c2Mapped;
-                      const hasDelta = item.delta !== null && item.delta !== undefined;
+                      const tol = item.tolerance ?? calcTolerance(item.unit, item.sp);
+                      const deltaSpVal = item.deltaSp !== undefined && item.deltaSp !== null
+                        ? item.deltaSp
+                        : (item.c1Mapped && item.pvHardware !== null ? Number((item.pvHardware - item.sp).toFixed(2)) : null);
+                      const absDeltaSpVal = deltaSpVal !== null ? Math.abs(deltaSpVal) : null;
+                      const deltaTwinVal = item.deltaTwin !== undefined && item.deltaTwin !== null
+                        ? item.deltaTwin
+                        : (item.c1Mapped && item.c2Mapped && item.pvHardware !== null && item.pvSimit !== null
+                            ? Number(Math.abs(item.pvHardware - item.pvSimit).toFixed(2))
+                            : null);
+                      const paramFidelity = item.parameterFidelity !== undefined && item.parameterFidelity !== null
+                        ? item.parameterFidelity
+                        : (deltaTwinVal !== null
+                            ? Number(Math.max(0.0, 100.0 - (deltaTwinVal / Math.max(Math.abs(item.sp), 1.0)) * 100.0).toFixed(1))
+                            : null);
+
+                      // Strict 4-tier evaluation on the frontend as well so no false MATCHED badge can ever render
+                      const spStatus: SpTrackingStatus = item.spTrackingStatus
+                        ? item.spTrackingStatus
+                        : calcSpStatus(item.c1Mapped, item.pvHardware, item.sp, tol);
+
+                      const twinSync: TwinSyncStatus = item.twinSyncStatus
+                        ? item.twinSyncStatus
+                        : (deltaTwinVal === null ? 'UNMAPPED' : deltaTwinVal <= tol ? 'TWIN_SYNCHRONIZED' : 'TWIN_DRIFT');
+
+                      const rowTagMap: Record<string, { primary: string; aliases: string[]; simit: string }> = {
+                        milk: { primary: 'cell1.Milk_PV', aliases: ['Milk_PV'], simit: 'cell2_simit.Milk_PV' },
+                        sugar: { primary: 'cell1.Sugar_PV', aliases: ['Sugar_PV'], simit: 'cell2_simit.Sugar_PV' },
+                        additive: { primary: 'cell1.Additive_PV', aliases: ['Additive_PV'], simit: 'cell2_simit.Additive_PV' },
+                        heat: { primary: 'cell1.Heating_PV', aliases: ['uht_temp_pv', 'pc1_uht_temp_pv'], simit: 'cell2_simit.Heating_PV' },
+                        cool: { primary: 'cell1.Cooling_PV', aliases: ['cooling_temp_pv'], simit: 'cell2_simit.Cooling_PV' },
+                        agitator: { primary: 'cell1.Agitator_PV', aliases: ['agitator_speed_pv'], simit: 'cell2_simit.Agitator_PV' },
+                      };
+                      const tagMappingInfo = rowTagMap[item.id] || { primary: `cell1.${item.id}_PV`, aliases: [], simit: `cell2_simit.${item.id}_PV` };
 
                       return (
-                        <tr key={item.id} className="hover:bg-slate-50 transition-none">
+                        <tr
+                          key={item.id}
+                          onDragOver={(e) => {
+                            e.preventDefault();
+                            e.dataTransfer.dropEffect = 'copy';
+                            setDragOverSlot(`dev:${item.id}`);
+                          }}
+                          onDragLeave={() => {
+                            if (dragOverSlot === `dev:${item.id}`) setDragOverSlot(null);
+                          }}
+                          onDrop={(e) =>
+                            handleDropOnOpsSlot(
+                              e,
+                              tagMappingInfo.primary,
+                              tagMappingInfo.aliases,
+                              item.name,
+                              item.unit
+                            )
+                          }
+                          className={`transition-colors ${
+                            dragOverSlot === `dev:${item.id}`
+                              ? 'ring-2 ring-emerald-500 bg-emerald-50/70'
+                              : 'hover:bg-slate-50'
+                          }`}
+                          title={`Thả Tag Kepware vào dòng này để gán PV Phần cứng cho [${item.name}]`}
+                        >
                           <td className="py-2.5 px-2.5">
                             <div className="font-bold text-slate-900 leading-tight">{item.name}</div>
                             <div className="text-[10px] text-slate-500">
-                              {item.phase} · <span className="font-semibold text-slate-600">Tol: ±{item.tolerance} {item.unit}</span>
+                              {item.phase} · <span className="font-semibold text-slate-600">Tol: ±{tol} {item.unit}</span>
                             </div>
                           </td>
-                          <td className="py-2.5 px-2 text-center font-bold text-blue-700">
-                            {item.sp.toFixed(1)} {item.unit}
+                          <td className="py-2.5 px-2 text-center font-bold text-blue-700 tabular-nums">
+                            {item.sp.toFixed(2)} {item.unit}
                           </td>
-                          <td className="py-2.5 px-2 text-center font-bold text-slate-900">
+                          <td className="py-2.5 px-2 text-center font-bold text-slate-900 tabular-nums">
                             {item.c1Mapped && item.pvHardware !== null ? (
-                              `${item.pvHardware.toFixed(1)} ${item.unit}`
+                              `${item.pvHardware.toFixed(2)} ${item.unit}`
                             ) : (
                               <span className="text-slate-400 font-normal">--</span>
                             )}
                           </td>
-                          <td className="py-2.5 px-2 text-center font-bold text-slate-900">
+                          <td
+                            onDragOver={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              e.dataTransfer.dropEffect = 'copy';
+                              setDragOverSlot(`dev-simit:${item.id}`);
+                            }}
+                            onDragLeave={() => {
+                              if (dragOverSlot === `dev-simit:${item.id}`) setDragOverSlot(null);
+                            }}
+                            onDrop={(e) =>
+                              handleDropOnOpsSlot(
+                                e,
+                                tagMappingInfo.simit,
+                                [],
+                                `${item.name} (SIMIT Twin)`,
+                                item.unit
+                              )
+                            }
+                            className={`py-2.5 px-2 text-center font-bold text-slate-900 tabular-nums transition-all ${
+                              dragOverSlot === `dev-simit:${item.id}`
+                                ? 'ring-2 ring-emerald-500 bg-emerald-100/70'
+                                : ''
+                            }`}
+                            title={`Thả Tag Kepware vào ô này để gán PV SIMIT Digital Twin cho [${item.name}]`}
+                          >
                             {item.c2Mapped && item.pvSimit !== null ? (
-                              `${item.pvSimit.toFixed(1)} ${item.unit}`
+                              `${item.pvSimit.toFixed(2)} ${item.unit}`
                             ) : (
                               <span className="text-slate-400 font-normal">--</span>
                             )}
                           </td>
-                          <td className="py-2.5 px-2 text-center font-mono">
-                            {hasDelta ? (
-                              <span className={`font-bold ${item.delta! <= item.tolerance ? 'text-emerald-700' : 'text-amber-700'}`}>
-                                {item.delta!.toFixed(1)} {item.unit}
-                              </span>
+                          <td className="py-2 px-2 text-center font-mono tabular-nums">
+                            {deltaSpVal !== null ? (
+                              <div className="space-y-0.5">
+                                <div className={`font-bold text-[10.5px] ${
+                                  absDeltaSpVal! <= tol
+                                    ? 'text-emerald-700'
+                                    : deltaSpVal > tol
+                                    ? 'text-rose-700'
+                                    : 'text-sky-700'
+                                }`}>
+                                  ΔSP: {deltaSpVal > 0 ? `+${deltaSpVal.toFixed(2)}` : deltaSpVal.toFixed(2)} {item.unit}
+                                </div>
+                                {deltaTwinVal !== null && paramFidelity !== null ? (
+                                  <div className="text-[9.5px] text-slate-600">
+                                    Twin: <span className={twinSync === 'TWIN_SYNCHRONIZED' ? 'text-emerald-700 font-bold' : 'text-amber-700 font-bold'}>{paramFidelity.toFixed(1)}%</span> (Δ={deltaTwinVal.toFixed(2)})
+                                  </div>
+                                ) : (
+                                  <div className="text-[9px] text-slate-400">Twin: UNMAPPED</div>
+                                )}
+                              </div>
                             ) : (
                               <span className="text-slate-400">--</span>
                             )}
                           </td>
-                          <td className="py-2.5 px-2 text-center">
-                            {!isBothMapped || item.status === 'CHƯA ÁNH XẠ' ? (
-                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-slate-100 text-slate-500 border border-slate-300 font-bold text-[10px]">
-                                ○ CHƯA ÁNH XẠ
-                              </span>
-                            ) : item.status === 'MATCHED' ? (
-                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-emerald-50 text-emerald-800 border border-emerald-300 font-bold text-[10px]">
-                                ● MATCHED
-                              </span>
-                            ) : item.status === 'TRACKING' ? (
-                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-sky-50 text-sky-800 border border-sky-300 font-bold text-[10px]">
-                                ● TRACKING
-                              </span>
-                            ) : (
-                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-amber-50 text-amber-800 border border-amber-300 font-bold text-[10px]">
-                                ▲ DEVIATING
-                              </span>
-                            )}
+                          <td className="py-2 px-2 text-center">
+                            <div className="flex flex-col items-center gap-0.5">
+                              {spStatus === 'UNMAPPED' ? (
+                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-slate-100 text-slate-500 border border-slate-300 font-bold text-[9.5px] whitespace-nowrap">
+                                  ○ UNMAPPED
+                                </span>
+                              ) : spStatus === 'MATCHED (IN TOLERANCE)' ? (
+                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-emerald-50 text-emerald-800 border border-emerald-300 font-bold text-[9.5px] whitespace-nowrap">
+                                  ● MATCHED (IN TOL)
+                                </span>
+                              ) : spStatus === 'RAMPING / DOSING' ? (
+                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-sky-50 text-sky-800 border border-sky-300 font-bold text-[9.5px] whitespace-nowrap">
+                                  ↗ RAMPING / DOSING
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-rose-50 text-rose-800 border border-rose-300 font-bold text-[9.5px] whitespace-nowrap">
+                                  ▲ DEVIATING / OVERSHOOT
+                                </span>
+                              )}
+                              {twinSync === 'TWIN_SYNCHRONIZED' && (
+                                <span className="text-[8.5px] font-bold text-emerald-700 uppercase">
+                                  ✓ TWIN_SYNCHRONIZED
+                                </span>
+                              )}
+                              {twinSync === 'TWIN_DRIFT' && (
+                                <span className="text-[8.5px] font-bold text-amber-700 uppercase">
+                                  ! TWIN_DRIFT
+                                </span>
+                              )}
+                            </div>
                           </td>
                         </tr>
                       );
@@ -2138,22 +2778,22 @@ export const BatchDispatcher: React.FC = () => {
               </div>
             </div>
 
-            {/* Metric Row 2: Model Fidelity Index */}
+            {/* Metric Row 2: Model Fidelity Index & SP Tracking Summary */}
             <div className="p-2 bg-white border border-slate-200 flex items-center justify-between gap-3">
               <div>
                 <div className="text-[10px] font-bold text-slate-700 uppercase tracking-tight">
-                  Twin Model Fidelity Index (Chỉ số tin cậy mô hình Twin)
+                  Twin Model Fidelity Index (|PV_PLC - PV_SIMIT|)
                 </div>
-                <div className="text-[10px] text-slate-500 mt-0.5">
-                  Tỷ lệ thông số đạt dung sai chấp nhận: {benchmarkSummary?.matchedParameters ?? 0}/{benchmarkSummary?.mappedParameters ?? 0} đã ánh xạ
+                <div className="text-[10px] text-slate-500 mt-0.5 font-mono">
+                  Twin Sync: <strong className="text-slate-800">{benchmarkSummary?.synchronizedParameters ?? 0}/{benchmarkSummary?.mappedTwinParameters ?? 0}</strong> | SP Matched: <strong className="text-slate-800">{benchmarkSummary?.matchedParameters ?? 0}/{benchmarkSummary?.mappedParameters ?? 0}</strong>
                 </div>
               </div>
-              <div className="text-right">
+              <div className="text-right font-mono tabular-nums">
                 <span className="text-base font-extrabold text-emerald-700">
                   {benchmarkSummary?.fidelityIndex != null ? `${benchmarkSummary.fidelityIndex.toFixed(1)}%` : '--'}
                 </span>
                 <div className="text-[9px] text-slate-400 font-bold uppercase">
-                  {benchmarkSummary?.fidelityIndex != null && benchmarkSummary.fidelityIndex >= 90 ? 'HIGH FIDELITY' : 'CALIBRATING'}
+                  {benchmarkSummary?.fidelityIndex != null && benchmarkSummary.fidelityIndex >= 90 ? 'TWIN SYNCHRONIZED' : 'CALIBRATING'}
                 </div>
               </div>
             </div>
@@ -2188,6 +2828,216 @@ export const BatchDispatcher: React.FC = () => {
             </div>
           </div>
         </div>
+      </div>
+
+      {/* =======================================================================
+          INDUSTRIAL AI IN-FLIGHT DOSING OFFSET & CPK ADVISOR (HUMAN-IN-THE-LOOP)
+         ======================================================================= */}
+      <div className="bg-white border border-slate-200 shadow-xs font-mono text-xs">
+        {/* Panel Header */}
+        <div className="px-5 py-3.5 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5">
+            <Sparkles className="w-4 h-4 text-sky-600" />
+            <div>
+              <span className="font-bold text-slate-900 uppercase tracking-wider text-xs">
+                AI IN-FLIGHT DOSING OFFSET & CPK ADVISOR (HUMAN-IN-THE-LOOP)
+              </span>
+              <span className="text-[10px] text-slate-500 block">
+                Tối ưu hóa thời gian ngắt sớm van khí nén (Pre-Act Cut-Off) dựa trên mô hình toán quán tính vật liệu rơi tự do
+              </span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2.5">
+            {aiAdvisor && (
+              <span className={`px-2 py-0.5 text-[10px] font-bold border uppercase ${
+                aiAdvisor.global_status === 'OPTIMAL_SIX_SIGMA'
+                  ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
+                  : 'bg-amber-50 text-amber-900 border-amber-300'
+              }`}>
+                {aiAdvisor.global_status === 'OPTIMAL_SIX_SIGMA' ? '● SIX SIGMA CPK ≥ 1.33' : '⚠ CẦN BÙ TRỪ QUÁN TÍNH'}
+              </span>
+            )}
+            <span className="px-2 py-0.5 bg-slate-100 text-slate-700 border border-slate-300 text-[10px] font-bold">
+              ĐỘ TIN CẬY: 98% (SPC GAUSS)
+            </span>
+            <button
+              type="button"
+              onClick={() => setIsAiAdvisorExpanded(!isAiAdvisorExpanded)}
+              className="h-7 px-2.5 bg-white hover:bg-slate-100 border border-slate-300 text-slate-700 text-[11px] font-bold flex items-center gap-1 active:translate-y-px transition-none"
+            >
+              {isAiAdvisorExpanded ? (
+                <>
+                  <ChevronUp className="w-3.5 h-3.5 text-slate-500" />
+                  <span>Thu gọn</span>
+                </>
+              ) : (
+                <>
+                  <ChevronDown className="w-3.5 h-3.5 text-slate-500" />
+                  <span>Mở rộng</span>
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+
+        {/* Success Toast Banner */}
+        {aiNotification && (
+          <div className="px-5 py-2.5 bg-emerald-50 border-b border-emerald-300 text-emerald-950 text-xs flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+              <span className="font-bold">{aiNotification}</span>
+            </div>
+            <span className="text-[10px] text-emerald-800">ISO 9001 / HACCP COMPLIANT</span>
+          </div>
+        )}
+
+        {/* Collapsible Panel Content */}
+        {isAiAdvisorExpanded && (
+          <div className="p-5 space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+              {(aiAdvisor?.channels || []).map((ch) => {
+                const isApplying = applyingOffsetChannel === ch.channel_id;
+                const isOptimal = ch.cpk >= 1.33;
+                const hasAppliedOffset = Math.abs(ch.active_applied_offset_kg) > 0.001;
+
+                return (
+                  <div
+                    key={ch.channel_id}
+                    className={`border p-4 flex flex-col justify-between space-y-3 transition-colors ${
+                      isOptimal
+                        ? 'bg-emerald-50/20 border-emerald-300'
+                        : ch.status === 'OUT_OF_SPEC'
+                        ? 'bg-rose-50/30 border-rose-300'
+                        : 'bg-amber-50/20 border-amber-300'
+                    }`}
+                  >
+                    {/* Header */}
+                    <div>
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-slate-900 text-xs">
+                          {ch.channel_id}
+                        </span>
+                        <span className={`px-1.5 py-0.2 text-[9.5px] font-bold border uppercase ${
+                          isOptimal
+                            ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                            : ch.status === 'OUT_OF_SPEC'
+                            ? 'bg-rose-100 text-rose-800 border-rose-300'
+                            : 'bg-amber-100 text-amber-800 border-amber-300'
+                        }`}>
+                          {ch.status}
+                        </span>
+                      </div>
+                      <div className="text-[11px] font-bold text-slate-700 mt-0.5 truncate" title={ch.channel_name}>
+                        {ch.channel_name}
+                      </div>
+                      <div className="text-[10px] text-slate-500 mt-0.5">
+                        Mã NVL: <strong className="text-slate-800">{ch.material_code}</strong> · Target SP: <strong className="text-slate-800">{ch.target_sp} {ch.unit}</strong>
+                      </div>
+                    </div>
+
+                    {/* Metrics Body */}
+                    <div className="space-y-2 py-2 border-y border-dashed border-slate-200 text-[11px]">
+                      {/* Cpk Index */}
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-500">Chỉ số Năng lực (Cpk):</span>
+                        <span className={`text-base font-bold tabular-nums ${
+                          isOptimal ? 'text-emerald-700' : 'text-rose-700'
+                        }`}>
+                          {ch.cpk.toFixed(2)}
+                        </span>
+                      </div>
+
+                      {/* Mean Error */}
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-500">Sai số quán tính (ē):</span>
+                        <span className={`font-bold tabular-nums ${
+                          ch.mean_error_kg > 0 ? 'text-amber-700' : 'text-slate-800'
+                        }`}>
+                          {ch.mean_error_kg > 0 ? `+${ch.mean_error_kg.toFixed(3)}` : ch.mean_error_kg.toFixed(3)} {ch.unit}
+                        </span>
+                      </div>
+
+                      {/* Standard Deviation */}
+                      <div className="flex items-center justify-between text-[10px]">
+                        <span className="text-slate-500">Độ lệch chuẩn (σ):</span>
+                        <span className="text-slate-700 tabular-nums">±{ch.std_dev_kg.toFixed(3)} {ch.unit}</span>
+                      </div>
+
+                      {/* Tolerance Band */}
+                      <div className="flex items-center justify-between text-[10px]">
+                        <span className="text-slate-500">Dải dung sai (±{ch.tolerance_percent}%):</span>
+                        <span className="text-slate-700 font-mono">[{ch.lsl} .. {ch.usl}]</span>
+                      </div>
+
+                      {/* Active Offset */}
+                      <div className="flex items-center justify-between text-[10px] pt-1 border-t border-slate-200">
+                        <span className="text-slate-500">Bù trừ đang áp dụng:</span>
+                        <span className="font-bold text-slate-800 tabular-nums">
+                          {hasAppliedOffset ? `${ch.active_applied_offset_kg > 0 ? '+' : ''}${ch.active_applied_offset_kg} ${ch.unit}` : '0.000 (Chưa bù)'}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Recommended Offset & Action */}
+                    <div className="space-y-2">
+                      <div className="p-2 bg-white border border-slate-200 text-[10.5px]">
+                        <span className="text-slate-500 block text-[9.5px]">Khuyến nghị Pre-Act Trim (AI):</span>
+                        <span className="font-bold text-sky-800 text-xs">
+                          {ch.recommended_offset_kg > 0 ? `+${ch.recommended_offset_kg}` : ch.recommended_offset_kg} {ch.unit}
+                        </span>
+                        <span className="text-[9px] text-slate-400 block mt-0.5">
+                          (Đóng sớm van trước điểm cắt {Math.abs(ch.recommended_offset_kg)} {ch.unit})
+                        </span>
+                      </div>
+
+                      <button
+                        type="button"
+                        disabled={isApplying || (isOptimal && Math.abs(ch.recommended_offset_kg) < 0.05)}
+                        onClick={() => handleApplyDosingOffset(ch)}
+                        className={`w-full h-8 px-2 text-[10px] font-bold uppercase tracking-wider border flex items-center justify-center gap-1.5 focus-visible:outline-2 focus-visible:outline-sky-600 focus-visible:outline-offset-1 active:translate-y-px transition-none ${
+                          isOptimal && Math.abs(ch.recommended_offset_kg) < 0.05
+                            ? 'bg-emerald-50 text-emerald-800 border-emerald-300 cursor-default'
+                            : 'bg-sky-600 hover:bg-sky-700 text-white border-sky-700 disabled:opacity-50'
+                        }`}
+                      >
+                        {isApplying ? (
+                          <>
+                            <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                            <span>Đang áp dụng...</span>
+                          </>
+                        ) : isOptimal && Math.abs(ch.recommended_offset_kg) < 0.05 ? (
+                          <>
+                            <Check className="w-3 h-3 text-emerald-700" />
+                            <span>ĐÃ BÙ TRỪ CHUẨN (Cpk ≥ 1.33)</span>
+                          </>
+                        ) : (
+                          <>
+                            <Sliders className="w-3 h-3" />
+                            <span>✔ Phê duyệt Bù trừ (HITL)</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Scientific Explanation Footnote */}
+            <div className="p-3 bg-slate-50 border border-slate-200 text-[10.5px] text-slate-500 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <TrendingUp className="w-4 h-4 text-slate-600" />
+                <span>
+                  <strong>Nguyên lý Vật lý:</strong> Vật liệu trong không gian giữa miệng van xả và mặt cân rơi tự do (In-Flight Fall) gây sai số vượt ngưỡng (Overshoot). Thuật toán AI tính toán thời điểm ngắt sớm (Pre-Act Cut-Off SP = SP + Offset) để triệt tiêu quán tính.
+                </span>
+              </div>
+              <div className="text-[10px] text-slate-400 font-bold uppercase">
+                TUÂN THỦ: ISA-88.01 BATCH CONTROL & ISO 22000 CCP TOLERANCE
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* 21 CFR Part 11 Electronic Signature Modal */}

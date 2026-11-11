@@ -10,12 +10,344 @@ audit trail logging, and parameterized query helpers.
 
 import pyodbc
 import time
+import json
+import os
 import logging
 from datetime import datetime
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any, Tuple, Union
 
 logger = logging.getLogger("DB_SyncEngine")
 logging.basicConfig(level=logging.INFO)
+
+PM_CONTROL_METADATA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recipe_pm_metadata.json")
+_pm_control_metadata_cache: Optional[Dict[str, Dict[str, Any]]] = None
+_pm_columns_verified: bool = False
+
+
+def load_recipe_pm_metadata() -> Dict[str, Dict[str, Any]]:
+    """Loads Siemens PM-CONTROL Sec. 5.8 extended recipe metadata from disk cache."""
+    global _pm_control_metadata_cache
+    if _pm_control_metadata_cache is not None:
+        return _pm_control_metadata_cache
+    if os.path.exists(PM_CONTROL_METADATA_PATH):
+        try:
+            with open(PM_CONTROL_METADATA_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    _pm_control_metadata_cache = data
+                    return _pm_control_metadata_cache
+        except Exception as e:
+            logger.debug(f"Could not read recipe_pm_metadata.json: {e}")
+    _pm_control_metadata_cache = {}
+    return _pm_control_metadata_cache
+
+
+def save_recipe_pm_metadata(
+    recipe_key: str,
+    batch_type: str,
+    normalizing_base: float,
+    expected_loss_percent: float,
+    version: Optional[str] = None,
+    status: Optional[str] = None,
+    author: Optional[str] = None,
+    reason: Optional[str] = None,
+    parameters: Optional[List[Dict[str, Any]]] = None,
+    temp_hot: Optional[float] = None,
+    temp_cold: Optional[float] = None,
+) -> Dict[str, Any]:
+    """
+    Saves Siemens PM-CONTROL Sec. 5.8 & 5.6 recipe metadata and automatic version history.
+    Maintains historical snapshots for seamless rollback per PM-CONTROL Sec. 5.6.3.
+    """
+    global _pm_control_metadata_cache
+    store = load_recipe_pm_metadata()
+    clean_key = str(recipe_key).strip().upper()
+
+    bt = str(batch_type or "NORMALIZED_PERCENTAGE").strip().upper()
+    if bt not in ("NORMALIZED_ABSOLUTE", "NORMALIZED_PERCENTAGE", "ABSOLUTE_FIXED"):
+        bt = "NORMALIZED_PERCENTAGE"
+
+    existing_entry = store.get(clean_key) or {}
+    history = list(existing_entry.get("version_history") or [])
+
+    entry = {
+        "batch_type": bt,
+        "normalizing_base": float(normalizing_base if normalizing_base is not None else 100.0),
+        "expected_loss_percent": float(expected_loss_percent if expected_loss_percent is not None else 0.0),
+        "version": str(version or existing_entry.get("version") or "v1.0"),
+        "status": str(status or existing_entry.get("status") or "RELEASED"),
+        "temp_hot": float(temp_hot if temp_hot is not None else existing_entry.get("temp_hot", 138.0)),
+        "temp_cold": float(temp_cold if temp_cold is not None else existing_entry.get("temp_cold", 4.0)),
+        "updated_at": datetime.now().isoformat(),
+        "version_history": history,
+    }
+
+    # If parameters or version specified, create/archive snapshot
+    if parameters is not None or version is not None:
+        snap_ver = str(version or entry["version"])
+        snap_params = parameters if parameters is not None else existing_entry.get("parameters", [])
+        snapshot = {
+            "version": snap_ver,
+            "status": entry["status"],
+            "timestamp": datetime.now().isoformat(),
+            "author": str(author or "Process_Engineer"),
+            "reason": str(reason or ("Initial version" if not history else f"Updated recipe parameters ({snap_ver})")),
+            "batch_type": bt,
+            "normalizing_base": entry["normalizing_base"],
+            "expected_loss_percent": entry["expected_loss_percent"],
+            "temp_hot": entry["temp_hot"],
+            "temp_cold": entry["temp_cold"],
+            "parameters": snap_params,
+        }
+        # Avoid duplicate consecutive snapshots if exactly identical version and parameters
+        if not history or history[0].get("version") != snap_ver or history[0].get("parameters") != snap_params:
+            history.insert(0, snapshot)
+            # Keep max 50 historical snapshots per recipe to prevent unbounded growth
+            entry["version_history"] = history[:50]
+
+    store[clean_key] = entry
+    try:
+        with open(PM_CONTROL_METADATA_PATH, "w", encoding="utf-8") as f:
+            json.dump(store, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.debug(f"Could not persist recipe_pm_metadata.json: {e}")
+    return entry
+
+
+def get_recipe_version_history(recipe_id_or_code: Union[str, int]) -> List[Dict[str, Any]]:
+    """
+    Retrieves full Siemens PM-CONTROL Sec. 5.6 version history snapshots for a recipe.
+    Auto-populates a baseline snapshot if history is currently empty.
+    """
+    store = load_recipe_pm_metadata()
+    clean_str = str(recipe_id_or_code).strip().upper()
+    possible_keys = [clean_str, f"ID-{clean_str}"]
+    if clean_str.startswith("ID-"):
+        possible_keys.append(clean_str.replace("ID-", ""))
+
+    entry = None
+    for k in possible_keys:
+        if k in store:
+            entry = store[k]
+            break
+
+    history = list(entry.get("version_history", []) if entry else [])
+    if history:
+        return history
+
+    # Auto-generate baseline snapshot from database if not yet in cache
+    try:
+        rid = int(clean_str.replace("ID-", "")) if clean_str.replace("ID-", "").isdigit() else None
+        recipes = get_recipes()
+        matched = None
+        for r in recipes:
+            if rid is not None and r.get("id") == rid:
+                matched = r
+                break
+            if str(r.get("code", "")).strip().upper() == clean_str:
+                matched = r
+                break
+
+        if matched:
+            baseline_snap = {
+                "version": matched.get("version") or "v1.0",
+                "status": matched.get("status") or "RELEASED",
+                "timestamp": matched.get("createdDate") or datetime.now().isoformat(),
+                "author": matched.get("author") or "Process_Engineer",
+                "reason": "Baseline Approved Master Recipe",
+                "batch_type": matched.get("batchType") or matched.get("batch_type") or "NORMALIZED_PERCENTAGE",
+                "normalizing_base": float(matched.get("normalizingBase") or matched.get("normalizing_base") or 100.0),
+                "expected_loss_percent": float(matched.get("expectedLossPercent") or matched.get("expected_loss_percent") or 0.0),
+                "temp_hot": float(matched.get("tempHot") or matched.get("SterilizationTemp") or 138.0),
+                "temp_cold": float(matched.get("tempCold") or matched.get("CoolingTemp") or 4.0),
+                "parameters": matched.get("parameters") or [],
+            }
+            save_recipe_pm_metadata(
+                recipe_key=clean_str,
+                batch_type=baseline_snap["batch_type"],
+                normalizing_base=baseline_snap["normalizing_base"],
+                expected_loss_percent=baseline_snap["expected_loss_percent"],
+                version=baseline_snap["version"],
+                status=baseline_snap["status"],
+                author=baseline_snap["author"],
+                reason=baseline_snap["reason"],
+                parameters=baseline_snap["parameters"],
+                temp_hot=baseline_snap["temp_hot"],
+                temp_cold=baseline_snap["temp_cold"],
+            )
+            return [baseline_snap]
+    except Exception as e:
+        logger.warning(f"Could not build baseline recipe snapshot: {e}")
+
+    return []
+
+
+def rollback_recipe_version(
+    recipe_id: int,
+    target_version: str,
+    operator: str = "Process_Engineer",
+    reason: str = ""
+) -> Dict[str, Any]:
+    """
+    Executes an atomic rollback of a Master Recipe to target historical version
+    per Siemens PM-CONTROL Section 5.6.3.
+    Re-inserts parameter set into dbo.Recipe_Detail, updates dbo.Recipes,
+    and logs PM_CONTROL_RECIPE_ROLLBACK to dbo.UserActionLog.
+    """
+    history = get_recipe_version_history(recipe_id)
+    target_snap = None
+    target_v_clean = str(target_version).strip().upper()
+
+    for snap in history:
+        if str(snap.get("version", "")).strip().upper() == target_v_clean:
+            target_snap = snap
+            break
+
+    if not target_snap:
+        raise ValueError(f"Target version [{target_version}] not found in recipe {recipe_id} history")
+
+    target_params = target_snap.get("parameters", [])
+    target_bt = target_snap.get("batch_type", "NORMALIZED_PERCENTAGE")
+    target_nb = float(target_snap.get("normalizing_base", 100.0))
+    target_loss = float(target_snap.get("expected_loss_percent", 0.0))
+    target_thot = float(target_snap.get("temp_hot", 138.0))
+    target_tcold = float(target_snap.get("temp_cold", 4.0))
+    target_status = target_snap.get("status", "RELEASED")
+
+    # Update SQL Server
+    ensure_pm_control_columns()
+    conn = get_db_connection(timeout=3)
+    if conn:
+        try:
+            with conn.cursor() as cur:
+                # 1. Update dbo.Recipes
+                try:
+                    cur.execute("""
+                        UPDATE Recipes
+                        SET Version = ?,
+                            Status = ?,
+                            SterilizationTemp = ?,
+                            CoolingTemp = ?,
+                            BatchType = ?,
+                            NormalizingBase = ?,
+                            ExpectedLossPercent = ?
+                        WHERE Recipe_ID = ?;
+                    """, (target_snap.get("version", target_version), target_status, target_thot, target_tcold, target_bt, target_nb, target_loss, recipe_id))
+                except Exception:
+                    cur.execute("""
+                        UPDATE Recipes
+                        SET Version = ?,
+                            Status = ?,
+                            SterilizationTemp = ?,
+                            CoolingTemp = ?
+                        WHERE Recipe_ID = ?;
+                    """, (target_snap.get("version", target_version), target_status, target_thot, target_tcold, recipe_id))
+
+                # 2. Re-insert dbo.Recipe_Detail
+                cur.execute("DELETE FROM Recipe_Detail WHERE Recipe_ID = ?;", (recipe_id,))
+                for p in target_params:
+                    ph = str(p.get("phaseId") or p.get("PhaseID") or "PH_DOSING")
+                    mc = str(p.get("materialCode") or p.get("Material_Code") or "RAW_MILK")
+                    mn = str(p.get("parameterName") or p.get("Material_Name") or mc)
+                    pct = float(p.get("targetValue") or p.get("Percentage") or 0.0)
+                    raw_tol = p.get("tolerance") or p.get("TolerancePercent") or "1.0"
+                    if isinstance(raw_tol, str):
+                        clean_tol = raw_tol.replace("±", "").replace("%", "").replace("°C", "").strip()
+                        tol = float(clean_tol) if clean_tol else 1.0
+                    else:
+                        tol = float(raw_tol)
+                    cur.execute("""
+                        INSERT INTO Recipe_Detail (Recipe_ID, PhaseID, Material_Code, Material_Name, Percentage, TolerancePercent)
+                        VALUES (?, ?, ?, ?, ?, ?);
+                    """, (recipe_id, ph, mc, mn, pct, tol))
+
+                # 3. Log Audit Trail
+                action_detail = f"PM-CONTROL Sec. 5.6 Rollback: Recipe ID {recipe_id} reverted to [{target_version}]. Reason: {reason or 'Process baseline restoration'}"
+                cur.execute("""
+                    INSERT INTO UserActionLog (UserName, UserRole, ActionName, Detail, ActionTime)
+                    VALUES (?, 'Process Engineer', 'PM_CONTROL_RECIPE_ROLLBACK', ?, GETDATE());
+                """, (operator, action_detail))
+
+                conn.commit()
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    # Save to JSON metadata and record rollback event in version history
+    new_ver_label = target_snap.get("version", target_version)
+    save_recipe_pm_metadata(
+        recipe_key=f"ID-{recipe_id}",
+        batch_type=target_bt,
+        normalizing_base=target_nb,
+        expected_loss_percent=target_loss,
+        version=new_ver_label,
+        status=target_status,
+        author=operator,
+        reason=f"Rollback to {target_version}: {reason or 'Approved baseline restored'}",
+        parameters=target_params,
+        temp_hot=target_thot,
+        temp_cold=target_tcold,
+    )
+
+    return {
+        "success": True,
+        "recipe_id": recipe_id,
+        "target_version": target_version,
+        "status": target_status,
+        "parameters_restored": len(target_params),
+        "message": f"Successfully rolled back Recipe ID {recipe_id} to [{target_version}] per Siemens PM-CONTROL Sec. 5.6"
+    }
+
+
+def classify_parameter_scaling_rule(phase_id: str, material_code: str = "", parameter_name: str = "") -> str:
+    """
+    Classifies a Phase Parameter's scaling rule per Siemens PM-CONTROL Chapter 5.8:
+    - Material Dosing parameters (Milk, Sugar, Additive bound to PH_SUPPLYMILK, PH_SUPPLYSUGAR, PH_SUPPLYADDITIVE):
+      scaling_rule = 'SCALABLE'
+    - Process parameters (Temp, Time, Speed bound to PH_HEATING, PH_COOLING, PH_AGITATING):
+      scaling_rule = 'FIXED'
+    """
+    ph = str(phase_id or "").strip().upper()
+    mc = str(material_code or "").strip().upper()
+    pn = str(parameter_name or "").strip().upper()
+
+    if ph in ("PH_HEATING", "PH_COOLING", "PH_AGITATING", "PH_MIXING", "PH_STERILIZATION", "PH_HOLDING"):
+        return "FIXED"
+    if any(k in mc or k in pn for k in ("TEMP", "NHIỆT", "TIME", "THỜI GIAN", "HOLDING", "SPEED", "AGITAT", "RPM", "KHUẤY")):
+        return "FIXED"
+    if ph in ("PH_SUPPLYMILK", "PH_SUPPLYSUGAR", "PH_SUPPLYADDITIVE", "PH_DOSING") or ph.startswith("PH_SUPPLY") or ph.startswith("PH_DOSING"):
+        return "SCALABLE"
+    if any(k in mc or k in pn for k in ("MILK", "SỮA", "SUGAR", "ĐƯỜNG", "ADDITIVE", "PHỤ GIA", "VITAMIN", "DOSING")):
+        return "SCALABLE"
+    return "SCALABLE"
+
+
+def ensure_pm_control_columns() -> None:
+    """Safely adds BatchType, NormalizingBase, ExpectedLossPercent columns to dbo.Recipes if missing."""
+    global _pm_columns_verified
+    if _pm_columns_verified:
+        return
+    try:
+        conn = get_db_connection(timeout=2)
+        if not conn:
+            return
+        with conn.cursor() as cur:
+            cur.execute("""
+                IF COL_LENGTH('dbo.Recipes', 'BatchType') IS NULL
+                    ALTER TABLE dbo.Recipes ADD BatchType NVARCHAR(50) NULL DEFAULT 'NORMALIZED_PERCENTAGE';
+                IF COL_LENGTH('dbo.Recipes', 'NormalizingBase') IS NULL
+                    ALTER TABLE dbo.Recipes ADD NormalizingBase FLOAT NULL DEFAULT 100.0;
+                IF COL_LENGTH('dbo.Recipes', 'ExpectedLossPercent') IS NULL
+                    ALTER TABLE dbo.Recipes ADD ExpectedLossPercent FLOAT NULL DEFAULT 0.0;
+            """)
+            conn.commit()
+        conn.close()
+        _pm_columns_verified = True
+    except Exception as e:
+        logger.debug(f"Optional PM-CONTROL SQL column check skipped: {e}")
+        _pm_columns_verified = True
 
 # Primary physical connection string
 CONN_STR_WINCC = (
@@ -348,13 +680,26 @@ def delete_customer(customer_id: int) -> bool:
 # ============================================================================
 
 def get_recipes() -> List[Dict[str, Any]]:
-    recipes_sql = """
-    SELECT Recipe_ID, Recipe_Code, Recipe_Name, Version, Status,
-           SterilizationTemp, CoolingTemp, CreatedDate
-    FROM Recipes
-    ORDER BY Recipe_ID ASC;
-    """
-    recipes = execute_query(recipes_sql)
+    ensure_pm_control_columns()
+    pm_store = load_recipe_pm_metadata()
+
+    try:
+        recipes_sql = """
+        SELECT Recipe_ID, Recipe_Code, Recipe_Name, Version, Status,
+               SterilizationTemp, CoolingTemp, CreatedDate,
+               BatchType, NormalizingBase, ExpectedLossPercent
+        FROM Recipes
+        ORDER BY Recipe_ID ASC;
+        """
+        recipes = execute_query(recipes_sql)
+    except Exception:
+        recipes_sql = """
+        SELECT Recipe_ID, Recipe_Code, Recipe_Name, Version, Status,
+               SterilizationTemp, CoolingTemp, CreatedDate
+        FROM Recipes
+        ORDER BY Recipe_ID ASC;
+        """
+        recipes = execute_query(recipes_sql)
 
     details_sql = """
     SELECT Detail_ID, Recipe_ID, PhaseID, Material_Code, Material_Name,
@@ -375,34 +720,99 @@ def get_recipes() -> List[Dict[str, Any]]:
         t_cold = float(r.get("CoolingTemp") or 4.0)
         created = str(r.get("CreatedDate") or "")
 
+        meta = pm_store.get(str(rcode).strip().upper()) or pm_store.get(f"ID-{rid}") or {}
+        batch_type = str(r.get("BatchType") or meta.get("batch_type") or "NORMALIZED_PERCENTAGE").strip().upper()
+        if batch_type not in ("NORMALIZED_ABSOLUTE", "NORMALIZED_PERCENTAGE", "ABSOLUTE_FIXED"):
+            batch_type = "NORMALIZED_PERCENTAGE"
+
+        raw_norm_base = r.get("NormalizingBase") if r.get("NormalizingBase") is not None else meta.get("normalizing_base")
+        if raw_norm_base is not None:
+            norm_base = float(raw_norm_base)
+        else:
+            norm_base = 100.0 if batch_type == "NORMALIZED_PERCENTAGE" else 1000.0
+
+        raw_loss_pct = r.get("ExpectedLossPercent") if r.get("ExpectedLossPercent") is not None else meta.get("expected_loss_percent")
+        expected_loss_pct = float(raw_loss_pct) if raw_loss_pct is not None else 0.0
+
         matching_details = [d for d in details if d.get("Recipe_ID") == rid]
         ingredients = []
         parameters = []
+        scalable_sum = 0.0
         for d in matching_details:
-            mat_code = d.get("Material_Code")
-            mat_name = d.get("Material_Name") or mat_code
+            mat_code = str(d.get("Material_Code") or "RAW_MILK")
+            mat_name = str(d.get("Material_Name") or mat_code)
             pct = float(d.get("Percentage") or 0.0)
             tol = float(d.get("TolerancePercent") or 1.0)
-            phase_id = d.get("PhaseID") or "PH_DOSING"
+            phase_id = str(d.get("PhaseID") or "PH_DOSING")
+            scaling_rule = classify_parameter_scaling_rule(phase_id, mat_code, mat_name)
+
+            if scaling_rule == "SCALABLE":
+                scalable_sum += pct
+
+            is_liquid = "MILK" in mat_code.upper() or "ADD" in mat_code.upper() or "SỮA" in mat_name.upper()
+            abs_unit = "L" if is_liquid else "kg"
+            param_unit = "%" if batch_type == "NORMALIZED_PERCENTAGE" and scaling_rule == "SCALABLE" else (
+                "°C" if "TEMP" in mat_code.upper() or phase_id in ("PH_HEATING", "PH_COOLING") else abs_unit
+            )
+            tol_unit = "%" if param_unit == "%" else param_unit
 
             ingredients.append({
                 "material_id": mat_code,
                 "material_code": mat_code,
                 "material_name": mat_name,
                 "percentage": pct,
-                "target_qty": round(pct * 10.0, 2),
+                "target_qty": round(pct * 10.0, 2) if batch_type == "NORMALIZED_PERCENTAGE" else round(pct, 2),
                 "tolerance": tol,
-                "unit": "L" if "MILK" in mat_code or "ADD" in mat_code else "kg"
+                "unit": abs_unit,
+                "scaling_rule": scaling_rule,
+                "scalingRule": scaling_rule
             })
 
             parameters.append({
                 "id": f"p-{d.get('Detail_ID')}",
                 "phaseId": phase_id,
-                "parameterName": f"Dosing {mat_name}",
+                "parameterName": mat_name if mat_name.lower().startswith("dosing") or scaling_rule == "FIXED" else f"Dosing {mat_name}",
                 "targetValue": pct,
-                "unit": "%",
-                "tolerance": f"±{tol}%"
+                "unit": param_unit,
+                "tolerance": f"±{tol}{tol_unit}",
+                "scaling_rule": scaling_rule,
+                "scalingRule": scaling_rule
             })
+
+        # Ensure standard thermal/process FIXED parameters are also represented in parameters
+        if not any(p.get("phaseId") == "PH_HEATING" for p in parameters):
+            parameters.append({
+                "id": f"p-hot-{rid}",
+                "phaseId": "PH_HEATING",
+                "parameterName": "Pasteurization / Sterilization Temp",
+                "targetValue": t_hot,
+                "unit": "°C",
+                "tolerance": "±1.0°C",
+                "scaling_rule": "FIXED",
+                "scalingRule": "FIXED",
+                "tagName": "Recipe_Temp_SP",
+                "targetNodeId": "ns=2;s=Channel1.Device1.Recipe_Temp_SP"
+            })
+        if not any(p.get("phaseId") == "PH_COOLING" for p in parameters):
+            parameters.append({
+                "id": f"p-cold-{rid}",
+                "phaseId": "PH_COOLING",
+                "parameterName": "Chilling / Storage Target Temp",
+                "targetValue": t_cold,
+                "unit": "°C",
+                "tolerance": "±0.5°C",
+                "scaling_rule": "FIXED",
+                "scalingRule": "FIXED",
+                "tagName": "Cooling_Temp_SP",
+                "targetNodeId": "ns=2;s=Channel1.Device1.Cooling_Temp_SP"
+            })
+
+        # Compute automatic loss compensation if scalable_sum exceeds base
+        if expected_loss_pct <= 0.0 and scalable_sum > 0:
+            if batch_type == "NORMALIZED_PERCENTAGE" and scalable_sum > 100.0:
+                expected_loss_pct = round(scalable_sum - 100.0, 2)
+            elif batch_type == "NORMALIZED_ABSOLUTE" and norm_base > 0 and scalable_sum > norm_base:
+                expected_loss_pct = round(((scalable_sum - norm_base) / norm_base) * 100.0, 2)
 
         formatted.append({
             "Recipe_ID": rid,
@@ -413,6 +823,9 @@ def get_recipes() -> List[Dict[str, Any]]:
             "SterilizationTemp": t_hot,
             "CoolingTemp": t_cold,
             "CreatedDate": created,
+            "BatchType": batch_type,
+            "NormalizingBase": norm_base,
+            "ExpectedLossPercent": expected_loss_pct,
             # snake_case standardized aliases
             "recipe_id": rid,
             "recipe_code": rcode,
@@ -422,14 +835,20 @@ def get_recipes() -> List[Dict[str, Any]]:
             "sterilization_temp": t_hot,
             "cooling_temp": t_cold,
             "created_date": created,
-            "target_volume": 1000.0,
+            "target_volume": norm_base if batch_type != "NORMALIZED_PERCENTAGE" else 1000.0,
+            "batch_type": batch_type,
+            "normalizing_base": norm_base,
+            "expected_loss_percent": expected_loss_pct,
             # Frontend aliases
             "id": rid,
             "code": rcode,
             "name": rname,
             "tempHot": t_hot,
             "tempCold": t_cold,
-            "targetVolume": 1000.0,
+            "targetVolume": norm_base if batch_type != "NORMALIZED_PERCENTAGE" else 1000.0,
+            "batchType": batch_type,
+            "normalizingBase": norm_base,
+            "expectedLossPercent": expected_loss_pct,
             "ingredients": ingredients,
             "parameters": parameters
         })
@@ -502,17 +921,34 @@ def update_recipe(recipe_id: int, status: Optional[str] = None, temp_hot: Option
 # ============================================================================
 
 def get_orders() -> List[Dict[str, Any]]:
-    sql = """
-    SELECT o.Order_ID, o.OrderCode, o.Recipe_ID, o.CustomerID, o.TargetVolume,
-           o.ActualVolume, o.Status, o.ScheduledStartTime, o.ActualStartTime, o.ActualEndTime, o.CreatedDate,
-           r.Recipe_Name, r.Recipe_Code, r.Version as RecipeVersion, r.SterilizationTemp, r.CoolingTemp,
-           c.CustomerName, c.CustomerCode, c.OrderPriority, c.PhoneNumber, c.FacilityAddress
-    FROM Orders o
-    LEFT JOIN Recipes r ON o.Recipe_ID = r.Recipe_ID
-    LEFT JOIN Customers c ON o.CustomerID = c.CustomerID
-    ORDER BY o.Order_ID DESC;
-    """
-    rows = execute_query(sql)
+    ensure_pm_control_columns()
+    pm_store = load_recipe_pm_metadata()
+
+    try:
+        sql = """
+        SELECT o.Order_ID, o.OrderCode, o.Recipe_ID, o.CustomerID, o.TargetVolume,
+               o.ActualVolume, o.Status, o.ScheduledStartTime, o.ActualStartTime, o.ActualEndTime, o.CreatedDate,
+               r.Recipe_Name, r.Recipe_Code, r.Version as RecipeVersion, r.SterilizationTemp, r.CoolingTemp,
+               r.BatchType, r.NormalizingBase, r.ExpectedLossPercent,
+               c.CustomerName, c.CustomerCode, c.OrderPriority, c.PhoneNumber, c.FacilityAddress
+        FROM Orders o
+        LEFT JOIN Recipes r ON o.Recipe_ID = r.Recipe_ID
+        LEFT JOIN Customers c ON o.CustomerID = c.CustomerID
+        ORDER BY o.Order_ID DESC;
+        """
+        rows = execute_query(sql)
+    except Exception:
+        sql = """
+        SELECT o.Order_ID, o.OrderCode, o.Recipe_ID, o.CustomerID, o.TargetVolume,
+               o.ActualVolume, o.Status, o.ScheduledStartTime, o.ActualStartTime, o.ActualEndTime, o.CreatedDate,
+               r.Recipe_Name, r.Recipe_Code, r.Version as RecipeVersion, r.SterilizationTemp, r.CoolingTemp,
+               c.CustomerName, c.CustomerCode, c.OrderPriority, c.PhoneNumber, c.FacilityAddress
+        FROM Orders o
+        LEFT JOIN Recipes r ON o.Recipe_ID = r.Recipe_ID
+        LEFT JOIN Customers c ON o.CustomerID = c.CustomerID
+        ORDER BY o.Order_ID DESC;
+        """
+        rows = execute_query(sql)
 
     # Pre-fetch recipe ingredient ratios from dbo.Recipe_Detail
     recipe_details_by_id: Dict[int, List[Dict[str, Any]]] = {}
@@ -560,7 +996,21 @@ def get_orders() -> List[Dict[str, Any]]:
         rcp_id = int(r.get("Recipe_ID") or 1)
         ster_temp = float(r.get("SterilizationTemp") or 138.0)
 
-        # Control Recipe Formulation: compute input setpoints based on Master Recipe percentages
+        meta = pm_store.get(str(r_code).strip().upper()) or pm_store.get(f"ID-{rcp_id}") or {}
+        batch_type = str(r.get("BatchType") or meta.get("batch_type") or "NORMALIZED_PERCENTAGE").strip().upper()
+        if batch_type not in ("NORMALIZED_ABSOLUTE", "NORMALIZED_PERCENTAGE", "ABSOLUTE_FIXED"):
+            batch_type = "NORMALIZED_PERCENTAGE"
+        raw_nb = r.get("NormalizingBase") if r.get("NormalizingBase") is not None else meta.get("normalizing_base")
+        norm_base = float(raw_nb) if raw_nb is not None else (100.0 if batch_type == "NORMALIZED_PERCENTAGE" else 1000.0)
+
+        if batch_type == "ABSOLUTE_FIXED":
+            conv_factor = 1.0
+        elif batch_type == "NORMALIZED_ABSOLUTE":
+            conv_factor = (vol / norm_base) if norm_base > 0 else 1.0
+        else:
+            conv_factor = vol / 100.0
+
+        # Control Recipe Formulation: compute input setpoints based on Siemens PM-CONTROL Sec. 5.8
         details = recipe_details_by_id.get(rcp_id, [])
         calculated_setpoints = []
         if details:
@@ -576,31 +1026,45 @@ def get_orders() -> List[Dict[str, Any]]:
                         phase_id = "PH_SUPPLYSUGAR"
                     else:
                         phase_id = "PH_SUPPLYADDITIVE"
-                u = "kg" if ("SUGAR" in m_code or "ĐƯỜNG" in m_name.upper()) else "L"
-                calc_sp = round((vol * pct) / 100.0, 2)
+                scaling_rule = classify_parameter_scaling_rule(phase_id, m_code, m_name)
+                if scaling_rule == "FIXED":
+                    calc_sp = round(pct, 2)
+                    u = "°C" if "TEMP" in m_code or phase_id in ("PH_HEATING", "PH_COOLING") else "s"
+                else:
+                    calc_sp = round(pct * conv_factor, 2)
+                    u = "kg" if ("SUGAR" in m_code or "ĐƯỜNG" in m_name.upper()) else "L"
                 calculated_setpoints.append({
                     "name": m_name,
                     "phaseId": phase_id,
                     "phase_id": phase_id,
                     "materialCode": m_code,
                     "calculatedValue": calc_sp,
+                    "masterValue": pct,
+                    "scalingRule": scaling_rule,
+                    "scaling_rule": scaling_rule,
+                    "conversionFactor": round(conv_factor, 4),
                     "unit": u,
                     "percentage": pct
                 })
-            calculated_setpoints.append({
-                "name": "Tiệt trùng UHT",
-                "phaseId": "PH_HEATING",
-                "phase_id": "PH_HEATING",
-                "calculatedValue": ster_temp,
-                "unit": "°C",
-                "percentage": 0.0
-            })
+            if not any(sp.get("phaseId") == "PH_HEATING" for sp in calculated_setpoints):
+                calculated_setpoints.append({
+                    "name": "Tiệt trùng UHT",
+                    "phaseId": "PH_HEATING",
+                    "phase_id": "PH_HEATING",
+                    "calculatedValue": ster_temp,
+                    "masterValue": ster_temp,
+                    "scalingRule": "FIXED",
+                    "scaling_rule": "FIXED",
+                    "conversionFactor": 1.0,
+                    "unit": "°C",
+                    "percentage": 0.0
+                })
         else:
             calculated_setpoints = [
-                {"name": "Supply Raw Milk (Dosing)", "phaseId": "PH_SUPPLYMILK", "calculatedValue": round(vol * 0.7, 2), "unit": "L", "percentage": 70.0},
-                {"name": "Supply Refined Sugar", "phaseId": "PH_SUPPLYSUGAR", "calculatedValue": round(vol * 0.2, 2), "unit": "kg", "percentage": 20.0},
-                {"name": "Supply Additives & Minerals", "phaseId": "PH_SUPPLYADDITIVE", "calculatedValue": round(vol * 0.1, 2), "unit": "L", "percentage": 10.0},
-                {"name": "UHT Sterilization Temperature", "phaseId": "PH_HEATING", "calculatedValue": ster_temp, "unit": "°C", "percentage": 0.0}
+                {"name": "Supply Raw Milk (Dosing)", "phaseId": "PH_SUPPLYMILK", "calculatedValue": round(vol * 0.7, 2), "masterValue": 70.0, "scalingRule": "SCALABLE", "unit": "L", "percentage": 70.0},
+                {"name": "Supply Refined Sugar", "phaseId": "PH_SUPPLYSUGAR", "calculatedValue": round(vol * 0.2, 2), "masterValue": 20.0, "scalingRule": "SCALABLE", "unit": "kg", "percentage": 20.0},
+                {"name": "Supply Additives & Minerals", "phaseId": "PH_SUPPLYADDITIVE", "calculatedValue": round(vol * 0.1, 2), "masterValue": 10.0, "scalingRule": "SCALABLE", "unit": "L", "percentage": 10.0},
+                {"name": "UHT Sterilization Temperature", "phaseId": "PH_HEATING", "calculatedValue": ster_temp, "masterValue": ster_temp, "scalingRule": "FIXED", "unit": "°C", "percentage": 0.0}
             ]
 
         formatted.append({
@@ -840,7 +1304,7 @@ def create_order(order_code: str, recipe_id: int = 1, customer_id: int = 1,
     return {"OrderCode": order_code, "Status": status, "TargetVolume": target_volume}
 
 
-def update_order_status(order_code: str, status: str, user: str = "Operator") -> bool:
+def update_order_status(order_code: str, status: str, user: str = "Operator", actual_volume: Optional[float] = None) -> bool:
     status_norm = status.strip().title()  # e.g., 'Running', 'Completed', 'Held', 'Ready'
 
     if status_norm == "Running":
@@ -849,21 +1313,31 @@ def update_order_status(order_code: str, status: str, user: str = "Operator") ->
         SET Status = ?, ActualStartTime = ISNULL(ActualStartTime, GETDATE())
         WHERE OrderCode = ? OR CAST(Order_ID AS NVARCHAR) = ?;
         """
+        execute_query(sql, (status_norm, str(order_code), str(order_code)))
     elif status_norm == "Completed":
-        sql = """
-        UPDATE Orders
-        SET Status = ?, ActualEndTime = GETDATE(), ActualVolume = ISNULL(ActualVolume, TargetVolume)
-        WHERE OrderCode = ? OR CAST(Order_ID AS NVARCHAR) = ?;
-        """
+        if actual_volume is not None and float(actual_volume) > 0:
+            sql = """
+            UPDATE Orders
+            SET Status = ?, ActualEndTime = GETDATE(), ActualVolume = ?
+            WHERE OrderCode = ? OR CAST(Order_ID AS NVARCHAR) = ?;
+            """
+            execute_query(sql, (status_norm, float(actual_volume), str(order_code), str(order_code)))
+        else:
+            sql = """
+            UPDATE Orders
+            SET Status = ?, ActualEndTime = GETDATE(), ActualVolume = ISNULL(ActualVolume, TargetVolume)
+            WHERE OrderCode = ? OR CAST(Order_ID AS NVARCHAR) = ?;
+            """
+            execute_query(sql, (status_norm, str(order_code), str(order_code)))
     else:
         sql = """
         UPDATE Orders
         SET Status = ?
         WHERE OrderCode = ? OR CAST(Order_ID AS NVARCHAR) = ?;
         """
+        execute_query(sql, (status_norm, str(order_code), str(order_code)))
 
-    execute_query(sql, (status_norm, str(order_code), str(order_code)))
-    audit_log(user, "Operator", "BATCH_STATUS_UPDATE", f"Order [{order_code}] transitioned to {status_norm}")
+    audit_log(user, "Operator", "BATCH_STATUS_UPDATE", f"Order [{order_code}] transitioned to {status_norm}" + (f" (Actual: {float(actual_volume):.2f}L)" if actual_volume else ""))
     return True
 
 
@@ -1062,7 +1536,18 @@ def get_batch_reports() -> List[Dict[str, Any]]:
     FROM ProductionReport
     ORDER BY CreatedTime DESC;
     """
-    return execute_query(sql)
+    rows = execute_query(sql)
+    # Enforce HACCP CCP Veto consistency across all overview tables
+    for r in rows:
+        qs = str(r.get("QualityStatus") or "").upper()
+        disp = str(r.get("DispositionAction") or "").upper()
+        if disp == "QUARANTINED" or qs in ("FAIL", "QUARANTINED") or "FAIL" in qs:
+            r["QualityStatus"] = "FAIL (QUARANTINE)"
+        elif qs == "WARNING" or disp == "HOLD":
+            r["QualityStatus"] = "WARNING (HOLD)"
+        elif qs in ("PASS", "CONFORMING", "RELEASED", "PASS (RELEASE READY)"):
+            r["QualityStatus"] = "PASS (RELEASE READY)"
+    return rows
 
 
 def get_batch_report_detail(order_code: str) -> Dict[str, Any]:

@@ -4,10 +4,10 @@
  */
 
 import React, { useState } from 'react';
-import { BatchDispatcherHome } from '../components/operations/BatchDispatcherHome';
-import { TopologyStatusMapping } from '../components/operations/TopologyStatusMapping';
-import { PhaseTimelineMonitoring } from '../components/operations/PhaseTimelineMonitoring';
-import { ProcessTelemetryAnalyze } from '../components/operations/ProcessTelemetryAnalyze';
+import { BatchDispatcher } from '../pages/operations/BatchDispatcher';
+import { TopologyMapping } from '../pages/operations/TopologyMapping';
+import { PhaseTimeline } from '../pages/operations/PhaseTimeline';
+import { ProcessTelemetry } from '../pages/operations/ProcessTelemetry';
 import { Activity, Radio, Network, Clock, LineChart } from 'lucide-react';
 import { useOperations } from '../context/OperationsContext';
 import { useMasterData } from '../context/MasterDataContext';
@@ -133,10 +133,10 @@ export const OperationsView: React.FC<OperationsViewProps> = ({ oeeSummary }) =>
 
       {/* Sub-view Viewport */}
       <section aria-label="Operations Active View">
-        {activeSubTab === 'home' && <BatchDispatcherHome />}
-        {activeSubTab === 'topology' && <TopologyStatusMapping />}
-        {activeSubTab === 'timeline' && <PhaseTimelineMonitoring />}
-        {activeSubTab === 'analyze' && <ProcessTelemetryAnalyze />}
+        {activeSubTab === 'home' && <BatchDispatcher />}
+        {activeSubTab === 'topology' && <TopologyMapping />}
+        {activeSubTab === 'timeline' && <PhaseTimeline />}
+        {activeSubTab === 'analyze' && <ProcessTelemetry />}
       </section>
     </main>
   );

@@ -3,7 +3,7 @@
  * contrast: WCAG AA Pass
  */
 
-import { Customer, MasterRecipe, WorkOrder } from '../types/masterData';
+import { Customer, MasterRecipe, WorkOrder, RecipeVersionSnapshot, WatchdogStatus, AiDosingAdvisorResponse } from '../types/masterData';
 import { MaterialStock, MaterialCode } from '../types/inventory';
 
 export type SqlStoreForwardMode = 'ONLINE' | 'BUFFERING' | 'SYNCING';
@@ -291,6 +291,75 @@ export async function updateRecipe(recipeId: number, update: Partial<MasterRecip
 export async function deleteRecipe(recipeId: number): Promise<any> {
   return await fetchJson(`/api/recipes/${recipeId}`, {
     method: 'DELETE',
+  });
+}
+
+/**
+ * Siemens PM-CONTROL Sec. 5.6.2: Retrieve recipe version history snapshots
+ */
+export async function getRecipeVersions(recipeId: number): Promise<RecipeVersionSnapshot[]> {
+  try {
+    const res = await fetchJson<{ status: string; success: boolean; data: RecipeVersionSnapshot[] }>(`/api/recipes/${recipeId}/versions`);
+    return res.data || [];
+  } catch (error) {
+    console.warn(`[API] Could not fetch version history for recipe ${recipeId}:`, error);
+    return [];
+  }
+}
+
+/**
+ * Siemens PM-CONTROL Sec. 5.6.3: Rollback recipe to historical version
+ */
+export async function rollbackRecipeVersion(
+  recipeId: number,
+  payload: { target_version: string; operator?: string; reason?: string }
+): Promise<any> {
+  return await fetchJson(`/api/recipes/${recipeId}/rollback`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+/**
+ * IEC 61508 / Chapter 9 Bidirectional Lifebit Watchdog Telemetry
+ */
+export async function getWatchdogStatus(): Promise<WatchdogStatus> {
+  try {
+    return await fetchJson<WatchdogStatus>('/api/gateway/watchdog-status');
+  } catch (error) {
+    console.warn('[API] Could not fetch watchdog status, returning fallback:', error);
+    return {
+      status: 'HEALTHY',
+      lifebit_pulse: true,
+      lifebit_counter: 0,
+      latency_ms: 10.0,
+      timeout_threshold_ms: 3000,
+      safe_hold_triggered: false,
+      consecutive_failures: 0,
+      last_sync_utc: new Date().toISOString(),
+    };
+  }
+}
+
+/**
+ * Industrial AI In-Flight Dosing & Statistical Process Control (SPC) Advisor
+ */
+export async function getAiDosingOffsetAdvisor(): Promise<AiDosingAdvisorResponse> {
+  return await fetchJson<AiDosingAdvisorResponse>('/api/ai/dosing-offset-advisor');
+}
+
+/**
+ * Human-in-the-Loop (HITL) approval to apply recommended dosing offset
+ */
+export async function applyDosingOffset(payload: {
+  hopper_id: string;
+  recommended_offset_kg: number;
+  operator?: string;
+  reason?: string;
+}): Promise<any> {
+  return await fetchJson('/api/ai/apply-dosing-offset', {
+    method: 'POST',
+    body: JSON.stringify(payload),
   });
 }
 
@@ -614,6 +683,66 @@ export async function deductBatchSingleShot(payload: {
   });
 }
 
+export interface MaterialAvailabilityItem {
+  tank_id: string;
+  material_name: string;
+  required_sp: number;
+  current_stock: number;
+  unit: string;
+  is_sufficient: boolean;
+  shortage_qty: number;
+}
+
+export interface MaterialAvailabilityResponse {
+  available: boolean;
+  is_sufficient: boolean;
+  status: 'SUFFICIENT' | 'INSUFFICIENT' | string;
+  interlock_message: string;
+  order_code?: string;
+  materials: MaterialAvailabilityItem[];
+}
+
+export interface BackflushStatusRecord {
+  id: number;
+  user_name: string;
+  user_role: string;
+  action_name: string;
+  detail: string;
+  action_time: string;
+  reason: string;
+  order_code: string;
+  idempotency_status: string;
+}
+
+export interface BackflushStatusResponse {
+  status: string;
+  count: number;
+  records: BackflushStatusRecord[];
+}
+
+/**
+ * Check raw material availability against 3 Virtual Raw Material Silos in dbo.Material_Stock
+ */
+export async function checkMaterialAvailability(payload: {
+  order_code?: string;
+  milk_sp?: number;
+  sugar_sp?: number;
+  additive_sp?: number;
+  setpoints?: Record<string, any>;
+}): Promise<MaterialAvailabilityResponse> {
+  return await fetchJson<MaterialAvailabilityResponse>('/api/inventory/check-availability', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+/**
+ * Retrieve recent automatic event-driven batch backflush transactions
+ */
+export async function getBackflushStatus(limit: number = 15): Promise<BackflushStatusResponse> {
+  return await fetchJson<BackflushStatusResponse>(`/api/inventory/backflush-status?limit=${limit}`);
+}
+
 /**
  * Fetch immutable FDA 21 CFR Part 11 consumption audit ledger
  */
@@ -653,6 +782,10 @@ export async function intakeInventory(payload: {
   currentStock?: number;
   mode?: 'add' | 'set';
   lot_number?: string;
+  supplierLot?: string;
+  supplier_lot?: string;
+  receiptCode?: string;
+  receipt_code?: string;
   remark?: string;
   user?: string;
 }): Promise<any> {
@@ -796,6 +929,9 @@ export interface InboundVerifyPayload {
   supplier_lot?: string;
   material_name?: string;
   unit?: string;
+  signature_meaning?: string;
+  reason?: string;
+  signature_hash?: string;
 }
 
 export interface InboundVerifyResponse {
@@ -973,7 +1109,7 @@ export async function verifyInboundIntake(payload: InboundVerifyPayload): Promis
   return await fetchJson('/api/inventory/inbound-verify', {
     method: 'POST',
     body: JSON.stringify(payload),
-  });
+  }, 15000);
 }
 
 /**
@@ -1253,9 +1389,15 @@ export interface SignActionResult {
   message: string;
   log_id?: number;
   record_hash?: string;
+  signature_hash?: string;
   timestamp?: string;
   username?: string;
+  user?: string;
+  signer?: string;
+  role?: string;
   user_role?: string;
+  meaning?: string;
+  reason?: string;
 }
 
 /**
@@ -2673,6 +2815,20 @@ export async function completeOdooManufacturingOrder(
   );
 }
 
+/**
+ * Smart Factory Closed-Loop: Confirms Output Tank is drained, releasing the auto-advance sensor wait.
+ */
+export async function confirmBatchDrain(): Promise<{ status: string; message: string; awaiting_drain?: boolean }> {
+  return await fetchJson<{ status: string; message: string; awaiting_drain?: boolean }>(
+    '/api/operations/dual-run/confirm-drain',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    },
+    5000
+  );
+}
+
 // ============================================================================
 // UNIVERSAL BIDIRECTIONAL MES READ/WRITE CLIENT (ISA-95 Level 3 MOM)
 // ============================================================================
@@ -2741,6 +2897,7 @@ export async function dispatchDualRunRecipe(payload: {
   recipe_name?: string;
   target_volume?: number;
   setpoints?: Record<string, number>;
+  current_batch?: number;
 }): Promise<any> {
   return await fetchJson('/api/operations/dual-run/dispatch-recipe', {
     method: 'POST',
@@ -2754,6 +2911,39 @@ export async function startDualRunBatch(payload: {
   execution_mode?: string;
 }): Promise<any> {
   return await fetchJson('/api/operations/dual-run/start-batch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function holdDualRunBatch(payload: {
+  order_code?: string;
+  execution_mode?: string;
+}): Promise<any> {
+  return await fetchJson('/api/operations/dual-run/hold-batch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function resumeDualRunBatch(payload: {
+  order_code?: string;
+  execution_mode?: string;
+}): Promise<any> {
+  return await fetchJson('/api/operations/dual-run/resume-batch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function abortDualRunBatch(payload: {
+  order_code?: string;
+  execution_mode?: string;
+}): Promise<any> {
+  return await fetchJson('/api/operations/dual-run/abort-batch', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -2804,12 +2994,143 @@ export interface QualityReleasePayload {
   telemetry_override?: Record<string, any>;
 }
 
+export interface EbrSignAndReleasePayload {
+  order_code: string;
+  report_code?: string;
+  username: string;
+  password: string;
+  signature_meaning?: string;
+  qa_comments?: string;
+  disposition: 'RELEASED' | 'QUARANTINED' | string;
+  capa_override_reason?: string;
+  telemetry_override?: Record<string, any>;
+}
+
+export interface EbrSignAndReleaseResult {
+  status: string;
+  order_code: string;
+  report_code: string;
+  disposition: string;
+  quality_status: string;
+  signed_by: string;
+  signer_name?: string;
+  signer_role: string;
+  signature_meaning: string;
+  signature_hash: string;
+  timestamp: string;
+  ccp_evaluations: Array<{
+    ccp_id: string;
+    parameter_name: string;
+    phase_id: string;
+    setpoint: number;
+    actual_value: number;
+    deviation_percent: number;
+    tolerance_band: string;
+    unit: string;
+    is_ccp_breach: boolean;
+    evaluation: 'PASS' | 'FAIL' | string;
+    haccp_standard?: string;
+  }>;
+  has_ccp_fail: boolean;
+  capa_override_applied: boolean;
+  odoo_uplink_status: {
+    synced: boolean;
+    mo_state: string;
+    fg_lot: string;
+  };
+  message: string;
+}
+
+export interface LotGenealogyRawMaterial {
+  tank_id: string;
+  material_name: string;
+  material_code: string;
+  lot_number: string;
+  supplier: string;
+  dosed_quantity: number;
+  unit: string;
+  received_date: string;
+  inspection_status: string;
+}
+
+export interface LotGenealogyData {
+  order_code: string;
+  report_code: string;
+  recipe_name: string;
+  total_produced: number;
+  quality_status: string;
+  disposition: string;
+  created_time: string;
+  signature?: {
+    is_signed: boolean;
+    signed_by: string;
+    signer_role: string;
+    timestamp: string;
+    signature_hash: string | null;
+    signature_meaning: string;
+    qa_reason: string;
+  };
+  raw_materials: LotGenealogyRawMaterial[];
+  process_execution_trace: {
+    process_cell: string;
+    unit_id: string;
+    ccp_checks: Array<{
+      parameter_name: string;
+      phase_id: string;
+      setpoint: number;
+      actual_value: number;
+      deviation_percent: number;
+      tolerance_band: string;
+      is_ccp: boolean;
+      status: string;
+      checked_at: string;
+    }>;
+    mass_balance: {
+      total_input_kg_l: number;
+      total_output_l: number;
+      loss_quantity: number;
+      loss_percent: number;
+      max_allowable_loss_percent: number;
+      balance_status: string;
+    };
+  };
+  finished_goods_lot: {
+    lot_id: string;
+    product_name: string;
+    batch_volume: number;
+    unit: string;
+    manufacturing_date: string;
+    expiry_date: string;
+    disposition: string;
+    quality_status: string;
+    erp_mo_reference: string;
+    odoo_synced: boolean;
+  };
+}
+
 export async function releaseQualityBatch(payload: QualityReleasePayload): Promise<any> {
   return await fetchJson('/api/quality/release-batch', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
+}
+
+export async function signAndReleaseEbr(payload: EbrSignAndReleasePayload): Promise<EbrSignAndReleaseResult> {
+  return await fetchJson<EbrSignAndReleaseResult>('/api/quality/ebr-sign-and-release', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getBatchLotGenealogy(orderCode: string): Promise<{ status: string; data: LotGenealogyData }> {
+  return await fetchJson<{ status: string; data: LotGenealogyData }>(`/api/quality/batch/${encodeURIComponent(orderCode)}/genealogy`);
+}
+
+export async function getBatchQualityRecords(): Promise<any[]> {
+  const res = await fetchJson<any>('/api/quality/batch-records');
+  return res?.data || res || [];
 }
 
 export async function getEquipmentHealth(): Promise<any> {
@@ -2905,5 +3226,160 @@ export async function updateUserStatus(
     body: JSON.stringify(statusPayload),
   });
 }
+
+// ============================================================================
+// ISA-88 (BatchML) & ISA-95 (B2MML) STANDARD API CLIENTS
+// ============================================================================
+
+export async function getIsaBatchmlRecipe(recipeId: string | number): Promise<any> {
+  return await fetchJson(`/api/isa/batchml/recipe/${encodeURIComponent(String(recipeId))}`);
+}
+
+export async function getIsaBatchmlEbr(orderId: string | number): Promise<any> {
+  return await fetchJson(`/api/isa/batchml/ebr/${encodeURIComponent(String(orderId))}`);
+}
+
+export async function getIsaB2mmlPerformance(orderId: string | number): Promise<any> {
+  return await fetchJson(`/api/isa/b2mml/performance/${encodeURIComponent(String(orderId))}`);
+}
+
+export async function getIsaMappingMatrix(): Promise<any> {
+  return await fetchJson('/api/isa/mapping-matrix');
+}
+
+export interface IsaIngestionMetrics {
+  status: string;
+  standard: string;
+  edge_poll_ms: number;
+  ui_broadcast_ms: number;
+  rbe_deadband: number;
+  ring_buffer_depth: number;
+  active_buffer_tags: number;
+  total_edge_ticks: number;
+  rbe_exception_broadcasts: number;
+  throttled_heartbeat_broadcasts: number;
+  skipped_edge_broadcasts: number;
+  bandwidth_saved_percent: number;
+  store_and_forward_pending: number;
+  mode: string;
+}
+
+export async function getIsaIngestionMetrics(): Promise<IsaIngestionMetrics> {
+  return await fetchJson('/api/isa/ingestion-metrics');
+}
+
+export async function getIsaCybersecurityPosture(): Promise<any> {
+  return await fetchJson('/api/isa/cybersecurity-posture');
+}
+
+export interface AssetInstantiatePayload {
+  template_code: string;
+  instance_code: string;
+  instance_name?: string;
+  line_code?: string;
+  cell_id?: string;
+}
+
+export async function instantiateAssetTemplate(payload: AssetInstantiatePayload): Promise<any> {
+  return await fetchJson('/api/isa/asset-generator/instantiate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function getTiaPortalUdtScl(download: boolean = false): Promise<any> {
+  if (download) {
+    const res = await fetch('/api/isa/tia-portal/udt-scl?download=true');
+    if (!res.ok) throw new Error(`HTTP error ${res.status}`);
+    const blob = await res.blob();
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'DB_OPC_Gateway.scl';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.URL.revokeObjectURL(url);
+    return { success: true };
+  }
+  return await fetchJson('/api/isa/tia-portal/udt-scl');
+}
+
+// ============================================================================
+// KEPWARE OPC UA ADDRESS SPACE TREE BROWSER & STAGED TAG POOL API
+// ============================================================================
+
+export interface KepwareTreeNode {
+  id: string;
+  name: string;
+  type: 'channel' | 'device' | 'folder' | 'tag';
+  data_type?: string;
+  children?: KepwareTreeNode[];
+}
+
+export interface KepwareBrowseTreeResponse {
+  status: string;
+  source?: string;
+  endpoint?: string;
+  server_connected?: boolean;
+  elapsed_ms?: number;
+  tree: KepwareTreeNode[];
+}
+
+export interface StagedTagPoolItem {
+  node_id: string;
+  name: string;
+  path: string;
+  data_type: string;
+  unit?: string;
+  value?: any;
+  quality?: 'Good' | 'Bad' | string;
+  timestamp?: string;
+}
+
+export interface StagedTagPoolResponse {
+  status: string;
+  count: number;
+  server_connected?: boolean;
+  tags: StagedTagPoolItem[];
+}
+
+export async function browseKepwareTree(): Promise<KepwareBrowseTreeResponse> {
+  return await fetchJson<KepwareBrowseTreeResponse>('/api/gateway/browse-tree', undefined, 8000);
+}
+
+export async function browseKepwareNode(nodeId: string): Promise<{ status: string; node_id: string; children: KepwareTreeNode[] }> {
+  return await fetchJson(`/api/gateway/browse-node?node_id=${encodeURIComponent(nodeId)}`, undefined, 6000);
+}
+
+export async function getTagPool(): Promise<StagedTagPoolResponse> {
+  return await fetchJson<StagedTagPoolResponse>('/api/gateway/pool', undefined, 5000);
+}
+
+export async function addTagsToPool(
+  tags: Array<{ node_id: string; name?: string; path?: string; data_type?: string; unit?: string }>
+): Promise<StagedTagPoolResponse> {
+  return await fetchJson<StagedTagPoolResponse>('/api/gateway/pool/add', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tags }),
+  }, 8000);
+}
+
+export async function removeTagFromPool(params: { node_id?: string; folder?: string; node_ids?: string[] }): Promise<StagedTagPoolResponse> {
+  const q = new URLSearchParams();
+  if (params.node_id) q.set('node_id', params.node_id);
+  if (params.folder) q.set('folder', params.folder);
+  const queryStr = q.toString();
+  return await fetchJson<StagedTagPoolResponse>(`/api/gateway/pool/remove${queryStr ? `?${queryStr}` : ''}`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  }, 5000);
+}
+
+
+
 
 

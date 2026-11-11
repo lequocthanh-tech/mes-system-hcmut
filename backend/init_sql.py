@@ -241,16 +241,16 @@ def init_mes_database():
         # Physical Laboratory / Pilot Bench Scale (5.0L storage tanks, 0.5L safety min) - ONLY fill NULLs, never overwrite custom calibrations
         cursor.execute("""
         UPDATE dbo.Material_Stock 
-        SET TankCapacity = 5.0, MinSafetyThreshold = 0.5, Unit = 'L'
-        WHERE AssignedTank = 'TANK-01' AND TankCapacity IS NULL;
+        SET TankCapacity = 1000.0, MinSafetyThreshold = 50.0, Unit = 'L'
+        WHERE AssignedTank = 'TANK-01' AND (TankCapacity IS NULL OR TankCapacity < 1000.0);
 
         UPDATE dbo.Material_Stock 
-        SET TankCapacity = 5.0, MinSafetyThreshold = 0.5, Unit = 'kg'
-        WHERE AssignedTank = 'TANK-02' AND TankCapacity IS NULL;
+        SET TankCapacity = 1000.0, MinSafetyThreshold = 50.0, Unit = 'kg'
+        WHERE AssignedTank = 'TANK-02' AND (TankCapacity IS NULL OR TankCapacity < 1000.0);
 
         UPDATE dbo.Material_Stock 
-        SET TankCapacity = 5.0, MinSafetyThreshold = 0.5, Unit = 'L'
-        WHERE AssignedTank = 'TANK-03' AND TankCapacity IS NULL;
+        SET TankCapacity = 1000.0, MinSafetyThreshold = 10.0, Unit = 'kg'
+        WHERE AssignedTank = 'TANK-03' AND (TankCapacity IS NULL OR TankCapacity < 1000.0);
         """)
 
         # Ensure dbo.Material_Input exists with ISA-95 verification columns
@@ -601,9 +601,9 @@ def init_mes_database():
             IF NOT EXISTS (SELECT 1 FROM dbo.Material_Stock)
             INSERT INTO dbo.Material_Stock (Material_Code, Material_Name, AssignedTank, CurrentStock, Total_Quantity, Unit, TankCapacity, MinSafetyThreshold, Last_Update)
             VALUES 
-            ('RAW_MILK', N'Fresh Raw Milk (Sữa tươi)', 'TANK-01', 0.0, 0.0, 'L', 5.0, 0.5, GETDATE()),
-            ('SUGAR', N'Refined Cane Sugar (Đường tinh luyện)', 'TANK-02', 0.0, 0.0, 'kg', 5.0, 0.5, GETDATE()),
-            ('ADDITIVE', N'Flavor & Vitamins (Hương liệu & Vi chất)', 'TANK-03', 0.0, 0.0, 'L', 5.0, 0.5, GETDATE())
+            ('RAW_MILK', N'Fresh Raw Milk (Sữa tươi)', 'TANK-01', 0.0, 0.0, 'L', 1000.0, 50.0, GETDATE()),
+            ('SUGAR', N'Refined Cane Sugar (Đường tinh luyện)', 'TANK-02', 0.0, 0.0, 'kg', 1000.0, 50.0, GETDATE()),
+            ('ADDITIVE', N'Flavor & Vitamins (Hương liệu & Vi chất)', 'TANK-03', 0.0, 0.0, 'kg', 1000.0, 10.0, GETDATE())
             """)
             tables_seeded.append("Material_Stock")
             logger.info("Material_Stock table was empty (count = 0); initialized factory baseline clean zero stock.")
@@ -773,6 +773,13 @@ def init_mes_database():
             Unit NVARCHAR(20) NULL,
             ReadTime DATETIME DEFAULT GETDATE()
         );
+        -- ISA-88 Batch Contextualization: Batch_ID / Unit_ID / Phase_ID (additive, NULLable, legacy-safe)
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.PLC_Datalog') AND name = 'Batch_ID')
+            ALTER TABLE dbo.PLC_Datalog ADD Batch_ID NVARCHAR(50) NULL;
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.PLC_Datalog') AND name = 'Unit_ID')
+            ALTER TABLE dbo.PLC_Datalog ADD Unit_ID NVARCHAR(50) NULL;
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.PLC_Datalog') AND name = 'Phase_ID')
+            ALTER TABLE dbo.PLC_Datalog ADD Phase_ID NVARCHAR(50) NULL;
         -- Zero-reversion Commissioning Mode:
         -- Never wipe or delete operator or synced orders on startup; preserve all records permanently.
         """)
